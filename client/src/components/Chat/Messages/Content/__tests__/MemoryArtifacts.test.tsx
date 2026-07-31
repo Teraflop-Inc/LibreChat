@@ -1,9 +1,9 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom/extend-expect';
-import MemoryArtifacts from '../MemoryArtifacts';
-import type { TAttachment, MemoryArtifact } from 'librechat-data-provider';
 import { Tools } from 'librechat-data-provider';
+import type { TAttachment, MemoryArtifact } from 'librechat-data-provider';
+import MemoryArtifacts from '../MemoryArtifacts';
 
 // Mock the localize hook
 jest.mock('~/hooks', () => ({
@@ -14,6 +14,14 @@ jest.mock('~/hooks', () => ({
     };
     return translations[key] || key;
   },
+  useExpandCollapse: (isExpanded: boolean) => ({
+    style: {
+      display: 'grid',
+      gridTemplateRows: isExpanded ? '1fr' : '0fr',
+      opacity: isExpanded ? 1 : 0,
+    },
+    ref: { current: null },
+  }),
 }));
 
 // Mock the MemoryInfo component
@@ -69,8 +77,7 @@ describe('MemoryArtifacts', () => {
       render(<MemoryArtifacts attachments={attachments} />);
 
       const button = screen.getByRole('button');
-      expect(button).toHaveClass('text-text-secondary-alt');
-      expect(button).toHaveClass('hover:text-text-primary');
+      expect(button).toHaveClass('text-text-secondary');
       expect(button).not.toHaveClass('text-red-500');
     });
 
@@ -127,6 +134,25 @@ describe('MemoryArtifacts', () => {
   });
 
   describe('Collapse/Expand Functionality', () => {
+    test('uses the standard tool row and expanded panel styling', () => {
+      const attachments = [createMemoryAttachment('update', 'memory1')];
+
+      render(<MemoryArtifacts attachments={attachments} />);
+
+      const button = screen.getByRole('button');
+      expect(button.parentElement).toHaveClass('my-1', 'h-5');
+      expect(button).toHaveClass('group/disclosure');
+
+      fireEvent.click(button);
+
+      expect(screen.getByTestId('memory-info').parentElement).toHaveClass(
+        'mb-2',
+        'mt-0',
+        'rounded-lg',
+        'bg-surface-secondary',
+      );
+    });
+
     test('toggles memory info visibility on button click', () => {
       const attachments = [createMemoryAttachment('update', 'memory1')];
 
