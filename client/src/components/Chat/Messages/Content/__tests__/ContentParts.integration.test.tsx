@@ -7,8 +7,11 @@ import ContentParts from '../ContentParts';
 
 jest.mock('~/hooks', () => ({
   useLocalize: () => (key: string, values?: Record<string | number, string>) => {
-    if (key === 'com_ui_used_n_tools') {
-      return `Used ${values?.[0]} tools`;
+    if (key === 'com_ui_ran_n_actions') {
+      return `Ran ${values?.[0]} actions`;
+    }
+    if (key === 'com_ui_running_n_actions') {
+      return `Running ${values?.[0]} actions`;
     }
     return key;
   },
@@ -251,7 +254,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    const toggle = screen.getByRole('button', { name: 'Used 2 tools' });
+    const toggle = screen.getByRole('button', { name: /^Ran 2 actions/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(toggle);
@@ -263,7 +266,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    expect(screen.getByRole('button', { name: 'Used 2 tools' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^Ran 2 actions/ })).toHaveAttribute(
       'aria-expanded',
       'true',
     );
@@ -279,7 +282,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    const toggle = screen.getByRole('button', { name: 'Used 2 tools' });
+    const toggle = screen.getByRole('button', { name: /^Running 2 actions/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
 
     fireEvent.click(screen.getAllByTestId('progress-text')[0]);
@@ -295,7 +298,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    expect(screen.getByRole('button', { name: 'Used 2 tools' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^Ran 2 actions/ })).toHaveAttribute(
       'aria-expanded',
       'true',
     );
@@ -310,7 +313,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    const toggle = screen.getByRole('button', { name: 'Used 2 tools' });
+    const toggle = screen.getByRole('button', { name: /^Ran 2 actions/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(toggle);
@@ -322,7 +325,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    expect(screen.getByRole('button', { name: 'Used 2 tools' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^Ran 2 actions/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     );
@@ -337,7 +340,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    const toggle = screen.getByRole('button', { name: 'Used 2 tools' });
+    const toggle = screen.getByRole('button', { name: /^Ran 2 actions/ });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(toggle);
@@ -349,7 +352,7 @@ describe('ContentParts integration: MCP image hoist and grouping', () => {
       </RecoilRoot>,
     );
 
-    expect(screen.getByRole('button', { name: 'Used 2 tools' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^Ran 2 actions/ })).toHaveAttribute(
       'aria-expanded',
       'true',
     );
