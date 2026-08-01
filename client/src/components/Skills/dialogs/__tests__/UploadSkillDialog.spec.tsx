@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { ReactNode } from 'react';
 import type { FileConfigInput } from 'librechat-data-provider';
+import type { ReactNode } from 'react';
 import UploadSkillDialog from '../UploadSkillDialog';
 
 const mockMutate = jest.fn();
@@ -71,8 +71,8 @@ jest.mock('~/utils', () => ({
 }));
 
 function getFileInput(container: HTMLElement): HTMLInputElement {
-  const input = container.querySelector('input[type="file"]');
-  if (!(input instanceof HTMLInputElement)) {
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+  if (input == null) {
     throw new Error('Upload input was not rendered');
   }
   return input;
