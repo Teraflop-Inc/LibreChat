@@ -1700,6 +1700,7 @@ export enum SafeSearchTypes {
 }
 
 export const webSearchSchema = z.object({
+  allowedAddresses: allowedAddressesSchema,
   serperApiKey: z.string().optional().default('${SERPER_API_KEY}'),
   serperApiKeyPreview: apiKeyPreviewSchema,
   searxngInstanceUrl: z.string().optional().default('${SEARXNG_INSTANCE_URL}'),
