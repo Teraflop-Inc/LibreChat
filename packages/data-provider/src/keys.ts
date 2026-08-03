@@ -86,6 +86,9 @@ export enum QueryKeys {
   skillStates = 'skillStates',
   /* General user favorites */
   favorites = 'favorites',
+  /* Scheduled chats */
+  schedules = 'schedules',
+  schedule = 'schedule',
 }
 
 // Dynamic query keys that require parameters
@@ -132,4 +135,8 @@ export enum MutationKeys {
   deleteSkillNode = 'deleteSkillNode',
   updateSkillNodeContent = 'updateSkillNodeContent',
   convoPin = 'convoPin',
+  createSchedule = 'createSchedule',
+  updateSchedule = 'updateSchedule',
+  deleteSchedule = 'deleteSchedule',
+  runSchedule = 'runSchedule',
 }
