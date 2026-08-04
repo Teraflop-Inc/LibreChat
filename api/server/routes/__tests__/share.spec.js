@@ -6,13 +6,15 @@ const mockGetSharedLinkExpiration = jest.fn();
 const mockGrantCreationPermissions = jest.fn();
 const mockUpdateSharedLinkPermissionsExpiration = jest.fn();
 const mockSharedLinksAccess = jest.fn((_req, _res, next) => next());
+const mockSharedLinkConfigMiddleware = jest.fn((_req, _res, next) => next());
+let mockShareTenantId;
 const mockBuildSharedLinkStartupPayload = jest.fn();
 const mockCanAccessSharedLink = jest.fn((req, _res, next) => {
   req.shareResourceId = 'resource-123';
+  req.shareTenantId = mockShareTenantId;
   next();
 });
 const mockGetAppConfig = jest.fn();
-const mockGetTenantId = jest.fn(() => undefined);
 const mockAssertConversationContentAllowed = jest.fn();
 const mockAssertModelBoundContent = jest.fn();
 const mockAssertSharedFileMetadataAllowed = jest.fn();
@@ -29,6 +31,7 @@ jest.mock('@librechat/api', () => ({
   isFileSnapshotEnabled: jest.fn(() => true),
   isFileSnapshotKillSwitchActive: jest.fn(() => false),
   buildSharedLinkStartupPayload: (...args) => mockBuildSharedLinkStartupPayload(...args),
+  createSharedLinkConfigMiddleware: jest.fn(() => mockSharedLinkConfigMiddleware),
   deleteSharedLinkWithCleanup: jest.fn(),
   getSharedLinkExpiration: (...args) => mockGetSharedLinkExpiration(...args),
   isActiveExpirationDate: jest.fn((expiredAt) => expiredAt > new Date()),
@@ -40,7 +43,6 @@ jest.mock('@librechat/api', () => ({
 
 jest.mock('@librechat/data-schemas', () => ({
   logger: { error: jest.fn(), warn: jest.fn() },
-  getTenantId: (...args) => mockGetTenantId(...args),
   createTempChatExpirationDate: jest.fn(() => new Date('2030-01-01T00:00:00.000Z')),
   runAsSystem: jest.fn((fn) => fn()),
   tenantStorage: { run: jest.fn((_ctx, fn) => fn()) },
@@ -195,10 +197,20 @@ const mockSharedMessagesResult = (result) => {
   });
 };
 
+const useResolvedSharedLinkConfig = () => {
+  mockSharedLinkConfigMiddleware.mockImplementationOnce(async (req, _res, next) => {
+    const tenantId = req.shareTenantId;
+    req.config = await mockGetAppConfig(
+      tenantId && tenantId !== '__SYSTEM__' ? { tenantId } : { baseOnly: true },
+    );
+    next();
+  });
+};
+
 describe('share routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetTenantId.mockReturnValue(undefined);
+    mockShareTenantId = undefined;
     mockGetAppConfig.mockResolvedValue({
       interfaceConfig: {
         privacyPolicy: { externalUrl: 'https://example.com/privacy' },
@@ -222,6 +234,7 @@ describe('share routes', () => {
   });
 
   it('serves shared startup config after shared-link access is granted', async () => {
+    useResolvedSharedLinkConfig();
     const response = await request(buildApp()).get('/api/share/share-123/config');
 
     expect(response.status).toBe(200);
@@ -243,7 +256,8 @@ describe('share routes', () => {
   });
 
   it('uses tenant-scoped app config for shared startup config when tenant context is present', async () => {
-    mockGetTenantId.mockReturnValue('tenant-abc');
+    mockShareTenantId = 'tenant-abc';
+    useResolvedSharedLinkConfig();
 
     const response = await request(buildApp()).get('/api/share/share-123/config');
 
@@ -252,7 +266,8 @@ describe('share routes', () => {
   });
 
   it('uses base app config for shared startup config in system context', async () => {
-    mockGetTenantId.mockReturnValue('__SYSTEM__');
+    mockShareTenantId = '__SYSTEM__';
+    useResolvedSharedLinkConfig();
 
     const response = await request(buildApp()).get('/api/share/share-123/config');
 
@@ -310,6 +325,44 @@ describe('share routes', () => {
       filters: contentFilters,
       messages: share.messages,
       shareId: 'share-123',
+    });
+  });
+
+  it('uses the share tenant policy when an authenticated viewer belongs to another tenant', async () => {
+    const ownerFilters = {
+      messages: {
+        pii: {
+          starterPatterns: ['sk_prefix'],
+        },
+      },
+    };
+    const share = {
+      shareId: 'share-123',
+      title: 'Protected Conversation',
+      messages: [{ isCreatedByUser: true, text: 'safe message' }],
+    };
+    mockShareTenantId = 'tenant-owner';
+    mockSharedLinkConfigMiddleware.mockImplementationOnce((req, _res, next) => {
+      expect(req.user.tenantId).toBe('tenant-viewer');
+      expect(req.shareTenantId).toBe('tenant-owner');
+      req.config = { filters: ownerFilters };
+      next();
+    });
+    mockSharedMessagesResult(share);
+
+    const response = await request(
+      buildApp({ user: { id: 'viewer', role: 'USER', tenantId: 'tenant-viewer' } }),
+    ).get('/api/share/share-123');
+
+    expect(response.status).toBe(200);
+    expect(mockAssertConversationContentAllowed).toHaveBeenCalledWith(ownerFilters, {
+      conversations: [{ title: share.title }],
+      messages: share.messages,
+    });
+    expect(mockAssertSharedFileMetadataAllowed).toHaveBeenCalledWith({
+      filters: ownerFilters,
+      messages: share.messages,
+      shareId: share.shareId,
     });
   });
 
@@ -955,6 +1008,7 @@ describe('share routes', () => {
 describe('share fork route', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockShareTenantId = undefined;
   });
 
   it('forks a shared conversation for the requesting user', async () => {
@@ -984,7 +1038,7 @@ describe('share fork route', () => {
     });
   });
 
-  it('passes current shared-content policy into the fork read preflight', async () => {
+  it('passes the share tenant policy into a cross-tenant fork read preflight', async () => {
     const share = {
       shareId: 'share-123',
       title: 'Protected Conversation',
@@ -997,10 +1051,17 @@ describe('share fork route', () => {
         messages: [],
       };
     });
+    mockShareTenantId = 'tenant-owner';
+    mockSharedLinkConfigMiddleware.mockImplementationOnce((req, _res, next) => {
+      expect(req.user.tenantId).toBe('tenant-viewer');
+      expect(req.shareTenantId).toBe('tenant-owner');
+      req.config = { filters: contentFilters };
+      next();
+    });
 
-    const response = await request(buildApp({ filters: contentFilters })).post(
-      '/api/share/share-123/fork',
-    );
+    const response = await request(
+      buildApp({ user: { id: 'viewer', role: 'USER', tenantId: 'tenant-viewer' } }),
+    ).post('/api/share/share-123/fork');
 
     expect(response.status).toBe(201);
     expect(mockAssertConversationContentAllowed).toHaveBeenCalledWith(contentFilters, {
@@ -1048,6 +1109,7 @@ describe('share fork route', () => {
 describe('share-scoped file routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockShareTenantId = undefined;
     mockGetStrategyFunctions.mockReturnValue({
       getDownloadStream: jest.fn(async () => Readable.from(['file-bytes'])),
     });
@@ -1080,7 +1142,7 @@ describe('share-scoped file routes', () => {
     expect(backfillSharedLinkFiles).not.toHaveBeenCalled();
   });
 
-  it('reapplies the current file policy before serving a snapshotted file', async () => {
+  it('reapplies the share tenant file policy for a cross-tenant viewer', async () => {
     const liveFile = {
       file_id: 'file-1',
       status: 'ready',
@@ -1098,10 +1160,17 @@ describe('share-scoped file routes', () => {
       hasSnapshots: true,
     });
     getFiles.mockResolvedValue([liveFile]);
+    mockShareTenantId = 'tenant-owner';
+    mockSharedLinkConfigMiddleware.mockImplementationOnce((req, _res, next) => {
+      expect(req.user.tenantId).toBe('tenant-viewer');
+      expect(req.shareTenantId).toBe('tenant-owner');
+      req.config = { filters: contentFilters };
+      next();
+    });
 
-    const response = await request(buildApp({ filters: contentFilters })).get(
-      '/api/share/share-123/files/file-1/download',
-    );
+    const response = await request(
+      buildApp({ user: { id: 'viewer', role: 'USER', tenantId: 'tenant-viewer' } }),
+    ).get('/api/share/share-123/files/file-1/download');
 
     expect(response.status).toBe(200);
     expect(mockAssertModelBoundContent).toHaveBeenCalledWith({
