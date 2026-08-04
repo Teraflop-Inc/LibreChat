@@ -1631,11 +1631,12 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
     });
 
     it.each([
-      { stored: true, supplied: false },
-      { stored: false, supplied: true },
+      { stored: true, supplied: false, expected: true },
+      { stored: false, supplied: true, expected: false },
+      { stored: undefined, supplied: true, expected: false },
     ])(
       'restores authoritative isTemporary=$stored before reconstruction',
-      async ({ stored, supplied }) => {
+      async ({ stored, supplied, expected }) => {
         mockGenerationJobManager.getJob.mockResolvedValue(
           makeToolApprovalJob({ metadata: { isTemporary: stored } }),
         );
@@ -1644,7 +1645,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         expect(res.status).toBe(200);
         await settled;
 
-        expect(capturedInit.isTemporary).toBe(stored);
+        expect(capturedInit.isTemporary).toBe(expected);
       },
     );
 

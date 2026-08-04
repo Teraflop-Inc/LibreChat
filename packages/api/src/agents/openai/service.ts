@@ -61,11 +61,11 @@ import {
   createChunk,
   writeSSE,
 } from './handlers';
-import { contentFilterBlockResponse, isContentFilterError } from '~/middleware/contentFilter';
 import {
   assertModelBoundContent,
   hasModelBoundContentProtection,
 } from '~/middleware/modelBoundContent';
+import { contentFilterBlockResponse, isContentFilterError } from '~/middleware/contentFilter';
 import { contentFilterUninspectableResponse } from '~/protection/files';
 import { collectReachableAgents } from '../traversal';
 import { getDynamicToolContexts } from '../hitl';

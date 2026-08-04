@@ -11,7 +11,6 @@ const {
   isPendingActionStale,
   mapToolApprovalResolutions,
   mapAskUserAnswer,
-  attachAskUserQuestionAnswer,
   findUndecidedToolCalls,
   findDisallowedDecisions,
   findIncompleteDecisions,
@@ -23,12 +22,9 @@ const {
   filterMalformedContentParts,
   getAgentCheckpointer,
   isContentFilterError,
-  assertResumeContentAllowed,
+  preflightResumeContent,
+  getResumeProvenance,
   getUserFacingResumeError,
-  mergeUserSubmittedPaths,
-  mergeUserSubmittedMessageFieldPaths,
-  getResumeUserSubmittedPaths,
-  getResumeUserSubmittedMessageFieldPaths,
   decrementPendingRequest,
   checkAndIncrementPendingRequest,
   isSteerPreemptSupported,
@@ -215,14 +211,13 @@ async function persistRePauseProgress({ req, client, job, streamId, conversation
     return;
   }
   const content = await resolveSegmentContent(client, streamId, job.createdAt);
-  const userSubmittedPaths = mergeUserSubmittedPaths(
-    meta.userSubmittedPaths,
-    getResumeUserSubmittedPaths(content, meta.pendingAction, req.body),
-  );
-  const userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
-    meta.userSubmittedMessageFieldPaths,
-    getResumeUserSubmittedMessageFieldPaths(content, meta.pendingAction, req.body),
-  );
+  const { userSubmittedPaths, userSubmittedMessageFieldPaths } = getResumeProvenance({
+    content,
+    pendingAction: meta.pendingAction,
+    body: req.body,
+    existingPaths: meta.userSubmittedPaths,
+    existingMessageFieldPaths: meta.userSubmittedMessageFieldPaths,
+  });
   const attachments = await resolveAccumulatedAttachments({
     client,
     conversationId,
@@ -361,14 +356,13 @@ async function finalizeResumedTurn({
   // drop empty/malformed tool_call parts so a resumed turn can't persist an invalid
   // part that breaks reload/rendering.
   const content = filterMalformedContentParts(rawContent);
-  const userSubmittedPaths = mergeUserSubmittedPaths(
-    meta.userSubmittedPaths,
-    getResumeUserSubmittedPaths(content, meta.pendingAction, req.body),
-  );
-  const userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
-    meta.userSubmittedMessageFieldPaths,
-    getResumeUserSubmittedMessageFieldPaths(content, meta.pendingAction, req.body),
-  );
+  const { userSubmittedPaths, userSubmittedMessageFieldPaths } = getResumeProvenance({
+    content,
+    pendingAction: meta.pendingAction,
+    body: req.body,
+    existingPaths: meta.userSubmittedPaths,
+    existingMessageFieldPaths: meta.userSubmittedMessageFieldPaths,
+  });
 
   /**
    * A resumed segment can end on an empty preempt boundary just as a fresh
@@ -775,66 +769,23 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
     }
   }
 
-  let seedContent;
-  let userSubmittedPaths;
-  let userSubmittedMessageFieldPaths;
-  let storedMessages;
   let resumeState;
+  let preparedContent;
   try {
     resumeState = await GenerationJobManager.getResumeState(streamId, job.createdAt);
-    seedContent = resumeState?.aggregatedContent ?? [];
-    const currentUserSubmittedMessageFieldPaths = getResumeUserSubmittedMessageFieldPaths(
-      seedContent,
-      pendingAction,
-      req.body,
-    );
-    if (pendingAction.payload?.type === 'ask_user_question') {
-      seedContent = attachAskUserQuestionAnswer(
-        seedContent,
-        pendingAction.payload.question,
-        req.body.answer,
-        pendingAction.payload.tool_call_id,
-      );
-    }
-    userSubmittedPaths = mergeUserSubmittedPaths(
-      job.metadata.userSubmittedPaths,
-      getResumeUserSubmittedPaths(seedContent, pendingAction, req.body),
-    );
-    userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
-      job.metadata.userSubmittedMessageFieldPaths,
-      currentUserSubmittedMessageFieldPaths,
-    );
-    storedMessages = job.metadata.userMessage
-      ? [
-          {
-            ...job.metadata.userMessage,
-            isCreatedByUser: true,
-            role: 'user',
-            files: req.body.files,
-          },
-          {
-            messageId: job.metadata.responseMessageId,
-            parentMessageId: job.metadata.userMessage.messageId,
-            isCreatedByUser: false,
-            role: 'assistant',
-            content: seedContent,
-            userSubmittedPaths,
-            userSubmittedMessageFieldPaths,
-          },
-        ]
-      : [];
-    await assertResumeContentAllowed(
+    preparedContent = await preflightResumeContent(
       {
         appConfig: req.config,
         endpointOption: req.body.endpointOption,
         conversationId,
-        targetMessageId: job.metadata.userMessage?.messageId,
         user: req.user,
-        storedMessages,
-        seedContent,
+        jobMetadata: job.metadata,
+        pendingAction,
+        body: req.body,
         resumeValue: mapped.resumeValue,
+        resumeState,
         liveFiles: Array.isArray(req.body.files) ? req.body.files : [],
-        isTemporary: (job.metadata.isTemporary ?? req.body?.isTemporary) === true,
+        isTemporary: job.metadata.isTemporary === true,
         checkpointNamespace,
         resolvedAddedAgent: req.resolvedAddedAgent,
       },
@@ -850,6 +801,8 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
     }
     return sendGenerationJson(res, 500, { error: GENERIC_RESUME_ERROR }, generationProtocolVersion);
   }
+  const { seedContent, storedMessages, userSubmittedPaths, userSubmittedMessageFieldPaths } =
+    preparedContent;
 
   // A legacy job has no saver-level generation namespace, so snapshot its exact
   // durable ids before the atomic resume claim. New jobs can skip this indexed
