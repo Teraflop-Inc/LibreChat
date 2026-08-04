@@ -9,6 +9,7 @@ jest.mock('@librechat/api', () => ({
   inspectContent: jest.fn(),
   extractFileContent: jest.fn((input) => [input]),
   genAzureEndpoint: jest.fn(),
+  resolveConfigSecret: jest.fn((value) => value),
   getSafeErrorMetadata: jest.fn((error) => ({
     type: error instanceof Error ? 'Error' : 'UnknownError',
     ...(Number.isInteger(error?.response?.status) && { status: error.response.status }),

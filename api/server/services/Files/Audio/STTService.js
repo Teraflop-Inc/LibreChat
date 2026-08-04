@@ -9,6 +9,7 @@ const {
   genAzureEndpoint,
   getSafeErrorMetadata,
   applyAxiosProxyConfig,
+  resolveConfigSecret,
   contentFilterBlockResponse,
   contentFilterUninspectableResponse,
   getBlockedUninspectableFileField,
@@ -204,7 +205,7 @@ class STTService {
    */
   openAIProvider(sttSchema, audioReadStream, audioFile, language) {
     const url = sttSchema?.url || 'https://api.openai.com/v1/audio/transcriptions';
-    const apiKey = extractEnvVariable(sttSchema.apiKey) || '';
+    const apiKey = resolveConfigSecret(sttSchema.apiKey) || '';
 
     const data = {
       file: audioReadStream,
@@ -240,7 +241,7 @@ class STTService {
       azureOpenAIApiDeploymentName: extractEnvVariable(sttSchema?.deploymentName),
     })}/audio/transcriptions?api-version=${extractEnvVariable(sttSchema?.apiVersion)}`;
 
-    const apiKey = sttSchema.apiKey ? extractEnvVariable(sttSchema.apiKey) : '';
+    const apiKey = sttSchema.apiKey ? resolveConfigSecret(sttSchema.apiKey) || '' : '';
 
     if (audioBuffer.byteLength > 25 * 1024 * 1024) {
       throw new Error('The audio file size exceeds the limit of 25MB');

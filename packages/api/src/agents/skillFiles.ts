@@ -1,4 +1,5 @@
 import { Readable } from 'stream';
+import { isAxiosError } from 'axios';
 import { Constants } from '@librechat/agents';
 import { logger } from '@librechat/data-schemas';
 import type { ToolSessionMap, CodeSessionContext } from '@librechat/agents';
@@ -13,9 +14,9 @@ import {
   UninspectableFileError,
 } from '~/protection';
 import { ContentFilterError, isContentFilterError } from '~/middleware/contentFilter';
+import { createConcurrencyLimiter, getSafeErrorMetadata } from '~/utils';
 import { extractInvokedSkillsFromPayload } from './run';
 import { isBinaryBuffer } from '~/skills/binary';
-import { getSafeErrorMetadata } from '~/utils';
 import { SKILL_FILE_PREFIX } from './skills';
 
 const MAX_INSPECTABLE_SKILL_FILE_BYTES = 10 * 1024 * 1024;
@@ -214,6 +215,94 @@ async function bufferSkillFileStream(stream: NodeJS.ReadableStream): Promise<Buf
   return Buffer.concat(chunks);
 }
 
+/** Cap on concurrent skill batch uploads per process. Bounds burst pressure
+ *  on codeapi's per-user upload limiter (default 30 requests / 5 min). */
+const SKILL_UPLOAD_CONCURRENCY = 3;
+
+/** Retry a 429'd upload only when the server's Retry-After fits under this
+ *  cap; a longer wait would stall a live chat turn worse than degrading. */
+const MAX_RETRY_AFTER_MS = 15_000;
+
+const uploadSlots = createConcurrencyLimiter(SKILL_UPLOAD_CONCURRENCY);
+const inflightPrimes = new Map<string, Promise<PrimeSkillFilesResult | null>>();
+
+type SkillUploadFiles = Array<{ stream: NodeJS.ReadableStream; filename: string }>;
+
+function getRetryAfterMs(error: unknown): number | null {
+  if (!isAxiosError(error) || error.response?.status !== 429) {
+    return null;
+  }
+  const header = error.response.headers?.['retry-after'];
+  const seconds = Number(Array.isArray(header) ? header[0] : header);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  return seconds * 1000;
+}
+
+/** Single retry on 429, honoring Retry-After up to MAX_RETRY_AFTER_MS.
+ *  Runs inside an upload slot so the wait also brakes queued uploads. */
+async function retryOn429<T>(attempt: () => Promise<T>): Promise<T> {
+  try {
+    return await attempt();
+  } catch (error) {
+    const retryAfterMs = getRetryAfterMs(error);
+    if (retryAfterMs == null || retryAfterMs > MAX_RETRY_AFTER_MS) {
+      throw error;
+    }
+    logger.warn(`[primeSkillFiles] Rate-limited priming; retrying in ${retryAfterMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+    return attempt();
+  }
+}
+
+/** Opens SKILL.md and bundled-file streams for one upload attempt. Called
+ *  per attempt — a failed upload consumes the streams, so a retry must
+ *  re-acquire them. */
+async function collectSkillUploadFiles(
+  params: PrimeSkillFilesParams,
+  inspectedBuffers: ReadonlyMap<SkillFileRecord, Buffer>,
+): Promise<SkillUploadFiles> {
+  const { skill, skillFiles, req, getStrategyFunctions } = params;
+  const filesToUpload: SkillUploadFiles = [];
+
+  // SKILL.md from the skill body
+  const bodyBuffer = Buffer.from(skill.body, 'utf-8');
+  filesToUpload.push({
+    stream: Readable.from(bodyBuffer),
+    filename: `${SKILL_FILE_PREFIX}${skill.name}/SKILL.md`,
+  });
+
+  // Bundled files from storage (parallel stream acquisition)
+  const streamResults = await Promise.allSettled(
+    skillFiles.map(async (file) => {
+      const inspected = inspectedBuffers.get(file);
+      if (inspected != null) {
+        return {
+          stream: Readable.from(inspected),
+          filename: `${SKILL_FILE_PREFIX}${skill.name}/${file.relativePath}`,
+        };
+      }
+      const strategy = getStrategyFunctions(file.source);
+      if (!strategy.getDownloadStream) {
+        logger.warn('[primeSkillFiles] No download stream for stored skill file');
+        return null;
+      }
+      const stream = await strategy.getDownloadStream(req, file.filepath);
+      return { stream, filename: `${SKILL_FILE_PREFIX}${skill.name}/${file.relativePath}` };
+    }),
+  );
+  for (const result of streamResults) {
+    if (result.status === 'fulfilled' && result.value) {
+      filesToUpload.push(result.value);
+    } else if (result.status === 'rejected') {
+      logger.error('[primeSkillFiles] Failed to get stream:', getSafeErrorMetadata(result.reason));
+    }
+  }
+
+  return filesToUpload;
+}
+
 /**
  * Uploads skill files to the code execution environment.
  *
@@ -223,8 +312,33 @@ async function bufferSkillFileStream(stream: NodeJS.ReadableStream): Promise<Buf
  *
  * After upload, persists new codeEnvIdentifiers on the SkillFile
  * documents for future freshness checks.
+ *
+ * Rate-limit resilience: concurrent primes of the same (skill, version)
+ * share one flight, uploads are bounded process-wide, and a 429 retries
+ * once per the server's Retry-After.
  */
 export async function primeSkillFiles(
+  params: PrimeSkillFilesParams,
+): Promise<PrimeSkillFilesResult | null> {
+  /* Single-flight per (skill, version): concurrent primes of the same cold
+   * skill join the in-flight upload instead of double-spending the upload
+   * rate budget. Skill _ids are tenant-scoped and the resulting session is
+   * resource-scoped (`<tenant>:skill:<id>:v:<version>`), so sharing the
+   * result across requests is sound. Per-process best-effort; the awaited
+   * codeEnvRef persist covers cross-turn and cross-node dedupe. */
+  const flightKey = `${params.skill._id}:v:${params.skill.version}`;
+  const inflight = inflightPrimes.get(flightKey);
+  if (inflight) {
+    return inflight;
+  }
+  const flight = executePrimeSkillFiles(params).finally(() => {
+    inflightPrimes.delete(flightKey);
+  });
+  inflightPrimes.set(flightKey, flight);
+  return flight;
+}
+
+async function executePrimeSkillFiles(
   params: PrimeSkillFilesParams,
 ): Promise<PrimeSkillFilesResult | null> {
   const {
@@ -240,10 +354,7 @@ export async function primeSkillFiles(
   const filters = req.config?.filters;
   const inspectStoredMetadata = filters?.skills?.pii != null || filters?.files?.pii != null;
   const inspectBundledFileContent = shouldInspectStoredSkillFileContent(req);
-  const inspectedStreams = new Map<
-    SkillFileRecord,
-    { stream: NodeJS.ReadableStream; filename: string }
-  >();
+  const inspectedBuffers = new Map<SkillFileRecord, Buffer>();
 
   assertStoredSkillBodyAllowed(skill, req);
 
@@ -255,7 +366,6 @@ export async function primeSkillFiles(
 
   if (inspectBundledFileContent) {
     for (const file of skillFiles) {
-      const filename = `${SKILL_FILE_PREFIX}${skill.name}/${file.relativePath}`;
       if (file.bytes > MAX_INSPECTABLE_SKILL_FILE_BYTES) {
         throwIfStoredSkillFileMustBeInspectable(req);
         continue;
@@ -274,10 +384,7 @@ export async function primeSkillFiles(
           continue;
         }
         assertStoredSkillFileAllowed(file, buffer, req);
-        inspectedStreams.set(file, {
-          stream: Readable.from(buffer),
-          filename,
-        });
+        inspectedBuffers.set(file, buffer);
       } catch (error) {
         if (isContentFilterError(error)) {
           throw error;
@@ -349,65 +456,43 @@ export async function primeSkillFiles(
     }
   }
 
-  // Collect streams for batch upload
-  const filesToUpload: Array<{ stream: NodeJS.ReadableStream; filename: string }> = [];
-
-  // SKILL.md from the skill body
-  const bodyBuffer = Buffer.from(skill.body, 'utf-8');
-  filesToUpload.push({
-    stream: Readable.from(bodyBuffer),
-    filename: `${SKILL_FILE_PREFIX}${skill.name}/SKILL.md`,
-  });
-
-  // Bundled files from storage (parallel stream acquisition)
-  const streamResults = await Promise.allSettled(
-    skillFiles.map(async (file) => {
-      const inspected = inspectedStreams.get(file);
-      if (inspected != null) {
-        return inspected;
-      }
-      const strategy = getStrategyFunctions(file.source);
-      if (!strategy.getDownloadStream) {
-        logger.warn('[primeSkillFiles] No download stream for stored skill file');
-        return null;
-      }
-      const stream = await strategy.getDownloadStream(req, file.filepath);
-      return { stream, filename: `${SKILL_FILE_PREFIX}${skill.name}/${file.relativePath}` };
-    }),
-  );
-  for (const result of streamResults) {
-    if (result.status === 'fulfilled' && result.value) {
-      filesToUpload.push(result.value);
-    } else if (result.status === 'rejected') {
-      logger.error('[primeSkillFiles] Failed to get stream:', getSafeErrorMetadata(result.reason));
-    }
-  }
-
-  if (filesToUpload.length === 0) {
-    return null;
-  }
-
+  const entityId = skill._id.toString();
   try {
-    const entityId = skill._id.toString();
-    const result = await batchUploadCodeEnvFiles({
-      req,
-      files: filesToUpload,
-      /* Resource identity for codeapi's sessionKey: skill files share
-       * cross-user-within-tenant under `<tenant>:skill:<id>:v:<version>`.
-       * Bumping `skill.version` on edit naturally invalidates the prior
-       * cache entry under the new sessionKey. */
-      kind: 'skill',
-      id: entityId,
-      version: skill.version,
-      /* Skill files are infrastructure: SKILL.md + bundled scripts/schemas/
-       * docs that the agent reads but should never edit. Tag the upload as
-       * read-only so codeapi seals the inputs (chmod 444 in-sandbox) and
-       * walker echoes the original refs as `inherited: true` even if some
-       * sandboxed code path mutates bytes on disk. Without this, modified
-       * skill files surface as ghost generated artifacts the user has no
-       * authority to download. */
-      read_only: true,
-    });
+    /* Streams open inside the slot (not while queued) and inside the retry
+     * closure (a failed attempt consumes them). The slot bounds concurrent
+     * uploads process-wide across both prime call sites. */
+    const uploaded = await uploadSlots(() =>
+      retryOn429(async () => {
+        const filesToUpload = await collectSkillUploadFiles(params, inspectedBuffers);
+        if (filesToUpload.length === 0) {
+          return null;
+        }
+        const result = await batchUploadCodeEnvFiles({
+          req,
+          files: filesToUpload,
+          /* Resource identity for codeapi's sessionKey: skill files share
+           * cross-user-within-tenant under `<tenant>:skill:<id>:v:<version>`.
+           * Bumping `skill.version` on edit naturally invalidates the prior
+           * cache entry under the new sessionKey. */
+          kind: 'skill',
+          id: entityId,
+          version: skill.version,
+          /* Skill files are infrastructure: SKILL.md + bundled scripts/schemas/
+           * docs that the agent reads but should never edit. Tag the upload as
+           * read-only so codeapi seals the inputs (chmod 444 in-sandbox) and
+           * walker echoes the original refs as `inherited: true` even if some
+           * sandboxed code path mutates bytes on disk. Without this, modified
+           * skill files surface as ghost generated artifacts the user has no
+           * authority to download. */
+          read_only: true,
+        });
+        return { filesToUpload, result };
+      }),
+    );
+    if (uploaded == null) {
+      return null;
+    }
+    const { filesToUpload, result } = uploaded;
     // Exclude SKILL.md from the returned files array — it is uploaded to disk
     // for bash access but has no codeEnvRef (cannot be cached). Omitting it
     // here keeps the fresh-upload and cache-hit code paths consistent.
@@ -717,6 +802,10 @@ export async function primeInvokedSkills(
           '[primeInvokedSkills] Failed to prime skill files:',
           getSafeErrorMetadata(r.reason),
         );
+      } else {
+        /* Fulfilled-null: primeSkillFiles swallowed an upload failure (429,
+         * partial batch). The run proceeds without this skill's files. */
+        logger.warn('[primeInvokedSkills] Priming returned no files for skill');
       }
     }
 
