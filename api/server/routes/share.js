@@ -111,7 +111,8 @@ const omitUnsharedMessageFiles = (messages) =>
   }));
 
 const createShareContentPreflight = (filters, options = {}) => {
-  if (filters == null) {
+  const legacyPii = options.legacyPii;
+  if (filters == null && legacyPii == null) {
     return undefined;
   }
   return async ({ title, messages, shareId }) => {
@@ -126,11 +127,16 @@ const createShareContentPreflight = (filters, options = {}) => {
           : messages,
     };
     if (options.user == null) {
-      await assertConversationContentAllowed(filters, snapshot);
+      if (legacyPii == null) {
+        await assertConversationContentAllowed(filters, snapshot);
+      } else {
+        await assertConversationContentAllowed(filters, snapshot, { legacyPii });
+      }
     } else {
       await assertConversationContentAllowed(filters, snapshot, {
         user: options.user,
         getFiles,
+        ...(legacyPii == null ? {} : { legacyPii }),
       });
     }
     if (!inspectSharedFileMetadata) {
@@ -320,6 +326,7 @@ if (allowSharedLinks) {
       try {
         const contentPreflight = createShareContentPreflight(req.config?.filters, {
           sharedFileMetadata: true,
+          legacyPii: req.config?.messageFilter?.pii,
         });
         const share = await getSharedMessages(req.params.shareId, req.shareResourceId, {
           // Viewer-independent: the per-link choice (stored on the share) decides
@@ -364,6 +371,7 @@ if (allowSharedLinks) {
           snapshotFiles: !isFileSnapshotKillSwitchActive(),
           sharedContentPreflight: createShareContentPreflight(req.config?.filters, {
             sharedFileMetadata: true,
+            legacyPii: req.config?.messageFilter?.pii,
           }),
         });
         if (!result) {
@@ -559,6 +567,7 @@ router.post(
         user: req.user,
         sharedFileMetadata: true,
         sharedFileMetadataFiles: false,
+        legacyPii: req.config?.messageFilter?.pii,
       });
 
       const created = await createSharedLink(
@@ -611,6 +620,7 @@ router.patch('/:shareId', requireJwtAuth, configMiddleware, async (req, res) => 
       user: req.user,
       sharedFileMetadata: true,
       sharedFileMetadataFiles: false,
+      legacyPii: req.config?.messageFilter?.pii,
     });
     const updatedShare = await updateSharedLink(
       req.user.id,

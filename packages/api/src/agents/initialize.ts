@@ -74,8 +74,8 @@ import {
 import { extractAgentContent, extractSkillContent } from '../protection/adapters/submissions';
 import { assertModelBoundContent } from '../middleware/modelBoundContent';
 import { registerMemoryTools, memoryToolUsageGuard } from './memory';
-import { ContentFilterError } from '../middleware/contentFilter';
 import { applyIntentLabels, sanitizeIntentLabels } from './intent';
+import { ContentFilterError } from '../middleware/contentFilter';
 import { applyBackgroundToolCalls } from './background';
 import { inspectContent } from '../protection/runtime';
 import { filterFilesByEndpointConfig } from '~/files';

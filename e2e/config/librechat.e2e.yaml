@@ -24,6 +24,10 @@ mcpSettings:
   allowedDomains:
     - https://allowed.example.com
 
+actions:
+  allowedDomains:
+    - example.com
+
 mcpServers:
   e2e-memory:
     type: stdio
