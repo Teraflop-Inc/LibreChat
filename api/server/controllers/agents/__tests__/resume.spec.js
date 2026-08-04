@@ -540,8 +540,8 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       const res = await post(approveBody());
 
       expect(res.status).toBe(400);
-      expect(mockGetActions).toHaveBeenCalledWith({ agent_id: { $in: [AGENT_ID] } }, true);
-      expect(mockDecryptMetadata).toHaveBeenCalledTimes(1);
+      expect(mockGetActions).toHaveBeenCalledWith({ agent_id: { $in: [AGENT_ID] } }, false);
+      expect(mockDecryptMetadata).not.toHaveBeenCalled();
       expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
       expect(mockInitializeClient).not.toHaveBeenCalled();
     });
@@ -736,6 +736,114 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
     });
 
+    it('keeps checkpoint tool arguments visible to files-only fail-close policy', async () => {
+      requestConfigOverrides = {
+        filters: {
+          files: {
+            pii: {
+              fields: ['content'],
+              starterPatterns: [],
+              uninspectable: 'block',
+            },
+          },
+        },
+      };
+      const job = makeToolApprovalJob();
+      job.metadata.userMessage.parentMessageId = Constants.NO_PARENT;
+      mockGenerationJobManager.getJob.mockResolvedValue(job);
+      mockCheckpointGetTuple.mockResolvedValue({
+        checkpoint: {
+          channel_values: {
+            messages: [
+              {
+                role: 'assistant',
+                content: 'inspect the attachment',
+                tool_calls: [
+                  {
+                    name: 'inspect_file',
+                    args: { file_id: 'checkpoint-tool-file' },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      const res = await post(approveBody());
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          error: 'content_filter_uninspectable',
+          source: 'file',
+          field: 'content',
+        }),
+      );
+      expect(mockGetFiles).toHaveBeenCalledWith(
+        { file_id: { $in: ['checkpoint-tool-file'] }, user: USER_ID, tenantId: TENANT_ID },
+        {},
+        {},
+      );
+      expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
+      expect(mockInitializeClient).not.toHaveBeenCalled();
+    });
+
+    it('keeps structured checkpoint text metadata visible to files-only policy', async () => {
+      requestConfigOverrides = {
+        filters: {
+          files: {
+            pii: {
+              fields: ['content'],
+              starterPatterns: [],
+              uninspectable: 'block',
+            },
+          },
+        },
+      };
+      const job = makeToolApprovalJob();
+      job.metadata.userMessage.parentMessageId = Constants.NO_PARENT;
+      mockGenerationJobManager.getJob.mockResolvedValue(job);
+      mockCheckpointGetTuple.mockResolvedValue({
+        checkpoint: {
+          channel_values: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: {
+                      value: 'inspect the attachment',
+                      annotations: [{ file_id: 'checkpoint-annotation-file' }],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      const res = await post(approveBody());
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          error: 'content_filter_uninspectable',
+          source: 'file',
+          field: 'content',
+        }),
+      );
+      expect(mockGetFiles).toHaveBeenCalledWith(
+        { file_id: { $in: ['checkpoint-annotation-file'] }, user: USER_ID, tenantId: TENANT_ID },
+        {},
+        {},
+      );
+      expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
+      expect(mockInitializeClient).not.toHaveBeenCalled();
+    });
+
     it('blocks protected values nested in cyclic checkpoint tool arguments', async () => {
       requestConfigOverrides = {
         filters: {
@@ -919,7 +1027,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         filters: {
           messages: {
             pii: {
-              fields: ['content_part'],
+              fields: ['decision_response'],
               starterPatterns: ['sk_prefix'],
             },
           },
@@ -949,7 +1057,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         expect.objectContaining({
           error: 'content_filter_block',
           source: 'message',
-          field: 'content_part',
+          field: 'decision_response',
         }),
       );
       expect(mockCheckAndIncrementPendingRequest).not.toHaveBeenCalled();
@@ -1990,17 +2098,22 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       expect(mockJobStore.updateJob).toHaveBeenCalledWith(
         CONVO_ID,
         {
-          userSubmittedPaths: ['/content/0/tool_call/output'],
+          userSubmittedMessageFieldPaths: [
+            { path: '/content/0/tool_call/output', field: 'answer' },
+          ],
         },
         1000,
       );
       expect(mockSaveMessage).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
-          userSubmittedPaths: ['/content/0/tool_call/output'],
+          userSubmittedMessageFieldPaths: [
+            { path: '/content/0/tool_call/output', field: 'answer' },
+          ],
         }),
         expect.anything(),
       );
+      expect(mockSaveMessage.mock.calls[0][1]).not.toHaveProperty('userSubmittedPaths');
       expect(mockGenerationJobManager.claimTerminalJob).toHaveBeenCalledWith(
         CONVO_ID,
         'complete',
@@ -2010,28 +2123,88 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       );
     });
 
+    it('persists answer provenance for the payload tool_call_id in a multi-ask turn', async () => {
+      const job = makeAskUserJob();
+      job.metadata.pendingAction.payload.tool_call_id = 'ask-first';
+      const firstAsk = makeToolCallContent({
+        id: 'ask-first',
+        name: 'ask_user_question',
+        args: '',
+        output: '',
+      });
+      const secondAsk = makeToolCallContent({
+        id: 'ask-second',
+        name: 'ask_user_question',
+        args: '',
+        output: '',
+      });
+      mockGenerationJobManager.getJob.mockResolvedValue(job);
+      mockGenerationJobManager.getResumeState.mockResolvedValue({
+        aggregatedContent: [firstAsk, secondAsk],
+      });
+      mockInitializeClient.mockResolvedValue({
+        client: makeClient({
+          contentParts: [
+            makeToolCallContent({
+              id: 'ask-first',
+              name: 'ask_user_question',
+              output: 'first answer',
+            }),
+            secondAsk,
+          ],
+        }),
+        userMCPAuthMap: {},
+      });
+
+      const res = await post({
+        conversationId: CONVO_ID,
+        actionId: ACTION_ID,
+        agent_id: AGENT_ID,
+        endpoint: 'agents',
+        answer: 'first answer',
+      });
+      expect(res.status).toBe(200);
+      await settled;
+      await flush();
+
+      const exactProvenance = [{ path: '/content/0/tool_call/output', field: 'answer' }];
+      expect(mockJobStore.updateJob).toHaveBeenCalledWith(
+        CONVO_ID,
+        { userSubmittedMessageFieldPaths: exactProvenance },
+        1000,
+      );
+      expect(mockSaveMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ userSubmittedMessageFieldPaths: exactProvenance }),
+        expect.anything(),
+      );
+    });
+
     it.each([
       {
         name: 'respond text',
         resolution: { tool_call_id: 'tc1', decision: 'respond', responseText: 'human response' },
         finalToolCall: { output: 'human response' },
         expectedPath: '/content/0/tool_call/output',
+        expectedField: 'decision_response',
       },
       {
         name: 'reject reason',
         resolution: { tool_call_id: 'tc1', decision: 'reject', reason: 'human rejection' },
         finalToolCall: { output: 'human rejection' },
         expectedPath: '/content/0/tool_call/output',
+        expectedField: 'decision_reason',
       },
       {
         name: 'edited arguments',
         resolution: { tool_call_id: 'tc1', decision: 'edit', editedArguments: { q: 'human edit' } },
         finalToolCall: { args: '{"q":"human edit"}' },
         expectedPath: '/content/0/tool_call/args',
+        expectedField: undefined,
       },
     ])(
       'persists exact provenance for $name',
-      async ({ resolution, finalToolCall, expectedPath }) => {
+      async ({ resolution, finalToolCall, expectedPath, expectedField }) => {
         const job = makeToolApprovalJob();
         job.metadata.pendingAction.payload.review_configs = [
           {
@@ -2054,18 +2227,24 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         await settled;
         await flush();
 
-        expect(mockJobStore.updateJob).toHaveBeenCalledWith(
-          CONVO_ID,
-          {
-            userSubmittedPaths: [expectedPath],
-          },
-          1000,
-        );
+        const expectedProvenance = expectedField
+          ? {
+              userSubmittedMessageFieldPaths: [{ path: expectedPath, field: expectedField }],
+            }
+          : { userSubmittedPaths: [expectedPath] };
+        expect(mockJobStore.updateJob).toHaveBeenCalledWith(CONVO_ID, expectedProvenance, 1000);
         expect(mockSaveMessage).toHaveBeenCalledWith(
           expect.anything(),
-          expect.objectContaining({ userSubmittedPaths: [expectedPath] }),
+          expect.objectContaining(expectedProvenance),
           expect.anything(),
         );
+        if (expectedField) {
+          expect(mockSaveMessage.mock.calls[0][1]).not.toHaveProperty('userSubmittedPaths');
+        } else {
+          expect(mockSaveMessage.mock.calls[0][1]).not.toHaveProperty(
+            'userSubmittedMessageFieldPaths',
+          );
+        }
       },
     );
 
@@ -2234,7 +2413,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         expect.anything(),
         expect.objectContaining({
           unfinished: true,
-          userSubmittedPaths: ['/content/0/tool_call/output'],
+          userSubmittedMessageFieldPaths: [
+            { path: '/content/0/tool_call/output', field: 'decision_response' },
+          ],
         }),
         expect.anything(),
       );
@@ -2436,7 +2617,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       expect(mockJobStore.updateJob).toHaveBeenCalledWith(
         CONVO_ID,
         {
-          userSubmittedPaths: ['/content/0/tool_call/output'],
+          userSubmittedMessageFieldPaths: [
+            { path: '/content/0/tool_call/output', field: 'decision_response' },
+          ],
         },
         1000,
       );

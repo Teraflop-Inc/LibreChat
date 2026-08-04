@@ -14,7 +14,8 @@ const {
   inspectContent,
   extractFileContent,
   isBinaryBuffer,
-  isFileFilterFieldEnabled,
+  hasActiveFilePolicy,
+  hasActiveFileFieldPolicy,
   contentFilterBlockResponse,
   contentFilterUninspectableResponse,
   getBlockedUninspectableFileField,
@@ -30,6 +31,7 @@ const {
   PermissionBits,
   checkOpenAIStorage,
   isAssistantsEndpoint,
+  hasActivePiiPatterns,
   mergeFileConfig,
 } = require('librechat-data-provider');
 const {
@@ -677,9 +679,9 @@ router.post('/', async (req, res) => {
 
     const submittedFile = { name: req.file?.originalname };
     const filters = req.config?.filters;
-    const inspectRawContent = isFileFilterFieldEnabled(filters, 'content');
-    const inspectExtractedText = isFileFilterFieldEnabled(filters, 'extracted_text');
-    const inspectTranscript = isFileFilterFieldEnabled(filters, 'transcript');
+    const inspectRawContent = hasActiveFileFieldPolicy(filters, ['content']);
+    const inspectExtractedText = hasActiveFileFieldPolicy(filters, ['extracted_text']);
+    const inspectTranscript = hasActiveFileFieldPolicy(filters, ['transcript']);
     if (inspectTranscript && typeof req.file?.mimetype === 'string') {
       const fileConfig = mergeFileConfig(req.config?.fileConfig);
       const shouldTranscribe = fileConfig.checkType(
@@ -766,7 +768,8 @@ router.post('/', async (req, res) => {
     return await processAgentFileUpload({ req, res, metadata, sseStream });
   } catch (error) {
     const contentProtectionActive =
-      req.config?.filters?.files?.pii != null || req.config?.messageFilter?.pii != null;
+      hasActiveFilePolicy(req.config?.filters) ||
+      hasActivePiiPatterns(req.config?.messageFilter?.pii);
     const message = resolveUploadErrorMessage(
       error,
       'Error processing file',

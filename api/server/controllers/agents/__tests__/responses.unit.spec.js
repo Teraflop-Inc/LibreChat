@@ -19,6 +19,36 @@ const mockGetSafeErrorMetadata = jest.fn((error) => {
     ...(Number.isInteger(status) && status >= 100 && status <= 599 && { status }),
   };
 });
+const mockHasActivePiiPatterns = (config) =>
+  config != null &&
+  (config.starterPatterns == null ||
+    config.starterPatterns.length > 0 ||
+    (config.customPatterns?.length ?? 0) > 0);
+const mockHasModelBoundContentProtection = (filters, legacyPii) => {
+  const sourcePolicies = [
+    legacyPii,
+    filters?.messages?.pii,
+    filters?.agentInstructions?.pii,
+    filters?.conversationStarters?.pii,
+    filters?.skills?.pii,
+    filters?.memories?.pii,
+    filters?.files?.pii,
+    filters?.toolArguments?.pii,
+    filters?.modelParameters?.pii,
+    filters?.actionMetadata?.pii,
+  ];
+  if (sourcePolicies.some(mockHasActivePiiPatterns)) {
+    return true;
+  }
+  const filePolicy = filters?.files?.pii;
+  return (
+    filePolicy?.uninspectable === 'block' &&
+    (filePolicy.fields == null ||
+      filePolicy.fields.some((field) =>
+        ['content', 'extracted_text', 'transcript'].includes(field),
+      ))
+  );
+};
 class MockAgentRunEnvelopeError extends TypeError {
   constructor(message) {
     super(message);
@@ -205,6 +235,7 @@ jest.mock('@librechat/api', () => ({
   isContentTraversalLimitError: jest.fn((error) => error?.code === 'content_filter_uninspectable'),
   prependContentTraversalFragments: jest.fn(),
   assertModelBoundContent: jest.fn(),
+  hasModelBoundContentProtection: mockHasModelBoundContentProtection,
   isContentFilterError: jest.fn((error) => error?.code === 'content_filter_block'),
   getSafeErrorMetadata: mockGetSafeErrorMetadata,
   contentFilterBlockResponse: jest.fn().mockReturnValue({
@@ -787,6 +818,7 @@ describe('createResponse controller', () => {
           text: 'assistant summary text',
           content,
           userSubmittedPaths: ['/content/1/text'],
+          userSubmittedMessageFieldPaths: [{ path: '/content/1/text', field: 'decision_response' }],
         },
       ]);
       api.assertModelBoundContent.mockImplementationOnce(({ storedMessages }) => {
@@ -795,6 +827,9 @@ describe('createResponse controller', () => {
             text: 'assistant summary text',
             content,
             userSubmittedPaths: ['/content/1/text'],
+            userSubmittedMessageFieldPaths: [
+              { path: '/content/1/text', field: 'decision_response' },
+            ],
           }),
         ]);
         throw blockedError;
@@ -1107,6 +1142,25 @@ describe('createResponse controller', () => {
     it('preserves the legacy provider error when protection is inactive', async () => {
       const api = require('@librechat/api');
       const rawValue = 'LEGACY-RESPONSES-PROVIDER-ERROR';
+      api.createRun.mockRejectedValueOnce(new Error(rawValue));
+
+      await createResponse(req, res);
+
+      expect(api.sendResponsesErrorResponse).toHaveBeenCalledWith(
+        res,
+        500,
+        rawValue,
+        'server_error',
+      );
+    });
+
+    it.each([
+      ['a management-only prompt', { prompts: { pii: {} } }],
+      ['an inert message', { messages: { pii: { starterPatterns: [] } } }],
+    ])('preserves the legacy provider error for %s policy', async (_policy, filters) => {
+      const api = require('@librechat/api');
+      const rawValue = 'LEGACY-RESPONSES-CONFIGURED-PROVIDER-ERROR';
+      req.config.filters = filters;
       api.createRun.mockRejectedValueOnce(new Error(rawValue));
 
       await createResponse(req, res);

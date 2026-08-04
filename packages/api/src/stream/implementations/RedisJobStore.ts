@@ -3851,6 +3851,9 @@ export class RedisJobStore implements IJobStoreV2 {
       userMessage: data.userMessage ? JSON.parse(data.userMessage) : undefined,
       responseMessageId: data.responseMessageId || undefined,
       userSubmittedPaths: data.userSubmittedPaths ? JSON.parse(data.userSubmittedPaths) : undefined,
+      userSubmittedMessageFieldPaths: data.userSubmittedMessageFieldPaths
+        ? JSON.parse(data.userSubmittedMessageFieldPaths)
+        : undefined,
       createdEventEmitted: data.createdEventEmitted === '1',
       sender: data.sender || undefined,
       syncSent: data.syncSent === '1',

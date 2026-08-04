@@ -25,6 +25,8 @@ const {
   extractAgentContent,
   extractAssistantActionContent,
   extractFileContent,
+  hasActiveFilePolicy,
+  hasActiveFileFieldPolicy,
   contentFilterBlockResponse,
   contentFilterUninspectableResponse,
   getBlockedOpaqueFileField,
@@ -49,6 +51,8 @@ const {
   actionDelimiter,
   AgentCapabilities,
   EModelEndpoint,
+  hasActivePiiFields,
+  hasActivePiiPatterns,
   openapiToFunction,
   removeNullishValues,
 } = require('librechat-data-provider');
@@ -91,7 +95,13 @@ const hasEditBit = (permission) => (permission & PermissionBits.EDIT) === Permis
 
 const blockFilteredActionContent = (req, res, actions) => {
   const filters = req.config?.filters;
-  if (filters == null || actions.length === 0) {
+  const actionPolicyActive = hasActivePiiPatterns(filters?.actionMetadata?.pii);
+  const definitionPolicyActive = hasActivePiiPatterns(filters?.agentInstructions?.pii);
+  const toolPolicyActive = hasActivePiiFields(filters?.toolArguments?.pii, ['name', 'arguments']);
+  if (
+    (!actionPolicyActive && !definitionPolicyActive && !toolPolicyActive) ||
+    actions.length === 0
+  ) {
     return false;
   }
   const filterableActions = actions.map((action) => {
@@ -139,12 +149,18 @@ const blockFilteredActionContent = (req, res, actions) => {
 
 const blockFilteredAgentContent = async (req, res, agentData) => {
   const filters = req.config?.filters;
-  if (filters == null) {
+  const definitionPolicyActive =
+    hasActivePiiPatterns(filters?.agentInstructions?.pii) ||
+    hasActivePiiPatterns(filters?.conversationStarters?.pii) ||
+    hasActivePiiPatterns(filters?.modelParameters?.pii) ||
+    hasActivePiiFields(filters?.toolArguments?.pii, ['name', 'arguments']);
+  const filePolicyActive = hasActiveFilePolicy(filters);
+  if (!definitionPolicyActive && !filePolicyActive) {
     return false;
   }
   let opaqueAgentData = agentData;
   let hydratedFiles = [];
-  if (filters.files?.pii != null) {
+  if (filePolicyActive) {
     try {
       const fileInspection = await resolveCanonicalFileReferences({
         filters,
@@ -1464,7 +1480,7 @@ const uploadAgentAvatarHandler = async (req, res) => {
       return res.status(400).json({ message: 'No file uploaded' });
     }
     filterFile({ req, file: req.file, image: true, isAvatar: true });
-    if (req.config?.filters?.files?.pii != null) {
+    if (hasActiveFileFieldPolicy(req.config?.filters, ['name', 'content'])) {
       const finding = inspectContent(extractFileContent({ name: req.file.originalname }), {
         filters: req.config.filters,
       });

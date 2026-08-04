@@ -16,6 +16,9 @@ jest.mock('@librechat/api', () => ({
   isContentTraversalLimitError: jest.fn((error) => error?.code === 'content_filter_uninspectable'),
   isContentTraversalProtected: jest.fn(() => false),
   assertModelBoundContent: jest.fn(),
+  hasActiveFilePolicy: jest.fn(
+    (filters) => filters?.files?.pii != null && filters.files.pii.starterPatterns?.length !== 0,
+  ),
   isContentFilterError: jest.fn(
     (error) =>
       error?.code === 'content_filter_block' || error?.code === 'content_filter_uninspectable',
@@ -96,6 +99,9 @@ jest.mock('~/server/middleware', () => {
               starterPatterns: [],
             },
           },
+          ...(req.headers['x-test-inert-file-policy'] === '1' && {
+            files: { pii: { fields: ['content'], starterPatterns: [] } },
+          }),
         },
       };
       next();
@@ -123,6 +129,8 @@ describe('message route conversation ownership filters', () => {
     getContentTraversalFragments,
     isContentTraversalProtected,
     assertModelBoundContent,
+    hasActiveFilePolicy,
+    resolveCanonicalFileReferences,
   } = require('@librechat/api');
   const {
     findAllArtifacts,
@@ -179,6 +187,10 @@ describe('message route conversation ownership filters', () => {
       ...(typeof isUserSubmitted === 'boolean' && { isUserSubmitted }),
       attachments: [{ file_id: 'file-1' }],
       userSubmittedPaths: ['/content/0/text', '/content/1/text', '/attachments/0/file_id'],
+      userSubmittedMessageFieldPaths: [
+        { path: '/content/0/text', field: 'answer' },
+        { path: '/content/1/text', field: 'decision_response' },
+      ],
       content: [
         { type: 'text', text: 'Different agent content', agentId: 'agent-2' },
         { type: 'text', text: 'Assistant content', agentId: 'agent-1' },
@@ -199,6 +211,33 @@ describe('message route conversation ownership filters', () => {
       expect(savedMessage).not.toHaveProperty('isUserSubmitted');
     }
     expect(savedMessage.userSubmittedPaths).toEqual(['/attachments/0/file_id', '/content/0/text']);
+    expect(savedMessage.userSubmittedMessageFieldPaths).toEqual([
+      { path: '/content/0/text', field: 'decision_response' },
+    ]);
+  });
+
+  it('does not hydrate branch files for an inert file policy', async () => {
+    getMessage.mockResolvedValue({
+      messageId: 'source-message',
+      conversationId: 'convo-1',
+      parentMessageId: 'parent-1',
+      isCreatedByUser: false,
+      content: [{ type: 'text', text: 'Assistant content', agentId: 'agent-1' }],
+    });
+    saveMessage.mockImplementation(async (_ctx, message) => message);
+
+    const response = await request(app)
+      .post('/api/messages/branch')
+      .set('x-test-inert-file-policy', '1')
+      .send({ messageId: 'source-message', agentId: 'agent-1' });
+
+    expect(response.status).toBe(201);
+    expect(hasActiveFilePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        files: { pii: { fields: ['content'], starterPatterns: [] } },
+      }),
+    );
+    expect(resolveCanonicalFileReferences).not.toHaveBeenCalled();
   });
 
   it('rechecks branched user-authored content under the current policy before saving', async () => {
@@ -266,6 +305,9 @@ describe('message route conversation ownership filters', () => {
         text: savedMessage.text,
         isUserSubmitted: false,
         userSubmittedPaths: ['/forged/model/output'],
+        userSubmittedMessageFieldPaths: [
+          { path: '/forged/model/output', field: 'decision_reason' },
+        ],
       });
 
     expect(response.status).toBe(201);
@@ -282,6 +324,7 @@ describe('message route conversation ownership filters', () => {
     );
     expect(saveMessage.mock.calls[0][1].conversationId).not.toBe(bodyConversationId);
     expect(saveMessage.mock.calls[0][1]).not.toHaveProperty('userSubmittedPaths');
+    expect(saveMessage.mock.calls[0][1]).not.toHaveProperty('userSubmittedMessageFieldPaths');
     expect(saveConvo).toHaveBeenCalledWith(
       expect.objectContaining({ userId: authenticatedUserId }),
       savedMessage,

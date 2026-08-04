@@ -1,16 +1,9 @@
 const { logger } = require('@librechat/data-schemas');
 const {
   Constants,
-  Permissions,
   ResourceType,
   EModelEndpoint,
   PermissionBits,
-  PermissionTypes,
-  AgentCapabilities,
-  isActionTool,
-  isEphemeralAgentId,
-  openapiToFunction,
-  validateAndParseOpenAPISpec,
 } = require('librechat-data-provider');
 const {
   checkAccess,
@@ -19,7 +12,6 @@ const {
   mapToolApprovalResolutions,
   mapAskUserAnswer,
   attachAskUserQuestionAnswer,
-  ASK_USER_QUESTION_TOOL_NAME,
   findUndecidedToolCalls,
   findDisallowedDecisions,
   findIncompleteDecisions,
@@ -30,22 +22,13 @@ const {
   sanitizeMessageForTransmit,
   filterMalformedContentParts,
   getAgentCheckpointer,
-  LIBRECHAT_CHECKPOINT_NAMESPACE_KEY,
-  isSkillPrimeMessage,
-  assertModelBoundContent,
-  extractStoredMessageContent,
-  inspectContent,
-  ContentFilterError,
-  ContentTraversalLimitError,
-  getContentTraversalFragments,
-  isContentTraversalProtected,
   isContentFilterError,
-  agentHasInlineMemoryTools,
-  getMemoryAgentId,
-  getResumeAgentSnapshot,
-  getResumeContentInspection,
-  isMemoryAgentEnabled,
-  isMemoryEnabled,
+  assertResumeContentAllowed,
+  getUserFacingResumeError,
+  mergeUserSubmittedPaths,
+  mergeUserSubmittedMessageFieldPaths,
+  getResumeUserSubmittedPaths,
+  getResumeUserSubmittedMessageFieldPaths,
   decrementPendingRequest,
   checkAndIncrementPendingRequest,
   isSteerPreemptSupported,
@@ -92,523 +75,25 @@ function sendGenerationJson(res, status, body, generationProtocolVersion) {
 const MAX_ASK_ANSWER_LENGTH = 16_000;
 const GENERIC_RESUME_ERROR = 'Resume failed';
 
-function hasResumeHistoryProtection(appConfig) {
-  return (
-    appConfig?.messageFilter?.pii != null ||
-    appConfig?.filters?.messages?.pii != null ||
-    appConfig?.filters?.toolArguments?.pii != null ||
-    appConfig?.filters?.files?.pii != null ||
-    appConfig?.filters?.skills?.pii != null
-  );
-}
-
-function hasResumeAgentProtection(appConfig) {
-  return (
-    appConfig?.filters?.agentInstructions?.pii != null ||
-    appConfig?.filters?.conversationStarters?.pii != null ||
-    appConfig?.filters?.modelParameters?.pii != null ||
-    appConfig?.filters?.actionMetadata?.pii != null ||
-    appConfig?.filters?.memories?.pii != null ||
-    appConfig?.filters?.toolArguments?.pii != null
-  );
-}
-
-function hasResumeAgentDefinitionProtection(appConfig) {
-  return (
-    appConfig?.filters?.agentInstructions?.pii != null ||
-    appConfig?.filters?.conversationStarters?.pii != null ||
-    appConfig?.filters?.modelParameters?.pii != null
-  );
-}
-
-function hasResumeContentProtection(appConfig) {
-  return hasResumeHistoryProtection(appConfig) || hasResumeAgentProtection(appConfig);
-}
-
-function getCheckpointMessageRole(message) {
-  const type = message?._getType?.() ?? message?.role;
-  if (type === 'human') {
-    return 'user';
-  }
-  if (type === 'ai') {
-    return 'assistant';
-  }
-  return type;
-}
-
-function getCheckpointSkill(message) {
-  if (!isSkillPrimeMessage(message)) {
-    return null;
-  }
-  const content = message?.content;
-  let body = '';
-  if (typeof content === 'string') {
-    body = content;
-  } else if (Array.isArray(content)) {
-    body = content
-      .map((part) => {
-        if (typeof part === 'string') {
-          return part;
-        }
-        return typeof part?.text === 'string' ? part.text : '';
-      })
-      .join('');
-  }
-  return {
-    name: message?.additional_kwargs?.skillName,
-    body,
-  };
-}
-
-function normalizeCheckpointToolCalls(message) {
-  const calls = [
-    ...(Array.isArray(message?.tool_calls) ? message.tool_calls : []),
-    ...(Array.isArray(message?.additional_kwargs?.tool_calls)
-      ? message.additional_kwargs.tool_calls
-      : []),
-  ];
-  return calls.map((call) => ({
-    name: call?.name,
-    arguments: call?.args ?? call?.arguments,
-    output: call?.output,
-    function: call?.function,
-    code_interpreter: call?.code_interpreter,
-  }));
-}
-
-async function getResumeCheckpointMessages(appConfig, conversationId, checkpointNamespace = '') {
-  const checkpointer = await getAgentCheckpointer(
-    appConfig?.endpoints?.[EModelEndpoint.agents]?.checkpointer,
-  );
-  if (!checkpointer) {
-    return [];
-  }
-  const tuple = await checkpointer.getTuple({
-    configurable: {
-      thread_id: conversationId,
-      checkpoint_ns: '',
-      ...(checkpointNamespace !== '' && {
-        [LIBRECHAT_CHECKPOINT_NAMESPACE_KEY]: checkpointNamespace,
-      }),
-    },
-  });
-  const messages = tuple?.checkpoint?.channel_values?.messages;
-  return Array.isArray(messages) ? messages : [];
-}
-
-function assertResumeToolContentAllowed(filters, messages, seedContent, resumeValue) {
-  if (filters?.toolArguments?.pii == null && filters?.messages?.pii == null) {
-    return;
-  }
-  const fragments = [];
-  const traversalErrors = [];
-  const collectStoredMessage = (message) => {
-    try {
-      fragments.push(...extractStoredMessageContent(message));
-    } catch (error) {
-      if (!(error instanceof ContentTraversalLimitError)) {
-        throw error;
-      }
-      fragments.push(...getContentTraversalFragments(error));
-      traversalErrors.push({ error, role: message.role });
-    }
-  };
-  for (const message of messages) {
-    const content = message?.content;
-    collectStoredMessage({
-      role: getCheckpointMessageRole(message),
-      text: typeof content === 'string' ? content : undefined,
-      content: Array.isArray(content) ? content : undefined,
-      tool_calls: normalizeCheckpointToolCalls(message),
-    });
-  }
-  collectStoredMessage({
-    role: 'assistant',
-    content: Array.isArray(seedContent) ? seedContent : undefined,
-  });
-  if (typeof resumeValue?.answer === 'string') {
-    collectStoredMessage({
-      role: 'tool',
-      content: [{ text: resumeValue.answer }],
-    });
-  }
-  for (const decision of Object.values(resumeValue ?? {})) {
-    if (decision?.type === 'edit') {
-      collectStoredMessage({
-        role: 'assistant',
-        tool_calls: [{ arguments: decision.updatedInput }],
-      });
-    } else if (decision?.type === 'respond' && typeof decision.responseText === 'string') {
-      collectStoredMessage({
-        role: 'tool',
-        content: [{ text: decision.responseText }],
-      });
-    } else if (decision?.type === 'reject' && typeof decision.reason === 'string') {
-      collectStoredMessage({
-        role: 'tool',
-        content: [{ text: decision.reason }],
-      });
-    }
-  }
-  const finding = inspectContent(fragments, {
-    filters: {
-      messages: filters?.messages,
-      toolArguments: filters?.toolArguments,
-    },
-  });
-  if (finding != null) {
-    throw new ContentFilterError(finding);
-  }
-  const protectedTraversal = traversalErrors.find(({ error, role }) =>
-    isContentTraversalProtected({
-      error,
-      filters,
-      roles: [role],
+const resumeContentProtectionDependencies = {
+  getAgentCheckpointer,
+  checkAccess,
+  getMessages,
+  getFiles,
+  getAgent,
+  getActions,
+  getUserMemories,
+  getRoleByName,
+  decryptMetadata,
+  canAccessAgent: (agent, user) =>
+    checkPermission({
+      userId: user.id,
+      role: user.role,
+      resourceType: ResourceType.AGENT,
+      resourceId: agent._id,
+      requiredPermission: PermissionBits.VIEW,
     }),
-  );
-  if (protectedTraversal != null) {
-    throw protectedTraversal.error;
-  }
-}
-
-function projectResumeAgentDefinition(agent) {
-  return {
-    name: agent?.name,
-    category: agent?.category,
-    description: agent?.description,
-    instructions: agent?.instructions,
-    additional_instructions: agent?.additional_instructions,
-    conversation_starters: agent?.conversation_starters,
-    edges: agent?.edges,
-    artifacts: agent?.artifacts,
-    support_contact: agent?.support_contact,
-    toolDefinitions: agent?.tools
-      ?.filter((tool) => typeof tool === 'string' && isActionTool(tool))
-      .map((name) => ({ name })),
-    model_parameters: {
-      ...(agent?.model ? { model: agent.model } : {}),
-      ...(agent?.model_parameters ?? {}),
-    },
-  };
-}
-
-async function getResumeAdditionalAgentRoots(req, endpointOption) {
-  const roots = [];
-  if (req.resolvedAddedAgent) {
-    roots.push(req.resolvedAddedAgent);
-  } else {
-    const addedAgentId = endpointOption?.addedConvo?.agent_id;
-    if (typeof addedAgentId === 'string' && !isEphemeralAgentId(addedAgentId)) {
-      const addedAgent = await getAgent({ id: addedAgentId });
-      if (addedAgent) {
-        roots.push(addedAgent);
-      }
-    }
-  }
-  return roots;
-}
-
-async function getResumeMemoryAgent(appConfig, primaryAgent) {
-  if (!isMemoryAgentEnabled(appConfig?.memory)) {
-    return null;
-  }
-  const configuredAgent = appConfig.memory.agent;
-  if (configuredAgent?.id) {
-    if (configuredAgent.id === primaryAgent.id) {
-      return primaryAgent;
-    }
-    return getAgent({ id: configuredAgent.id });
-  }
-  if (configuredAgent?.provider && configuredAgent?.model) {
-    return {
-      id: Constants.EPHEMERAL_AGENT_ID,
-      ...configuredAgent,
-    };
-  }
-  return null;
-}
-
-async function getResumeActionSnapshots(filters, agents) {
-  if (filters?.actionMetadata?.pii == null && filters?.toolArguments?.pii == null) {
-    return [];
-  }
-  const agentIds = agents
-    .filter((agent) => agent.tools?.some((tool) => typeof tool === 'string' && isActionTool(tool)))
-    .map((agent) => agent.id)
-    .filter((id) => typeof id === 'string' && id);
-  if (agentIds.length === 0) {
-    return [];
-  }
-  const actions = (await getActions({ agent_id: { $in: agentIds } }, true)) ?? [];
-  const withFunctions = actions.map((action) => {
-    const parsed = validateAndParseOpenAPISpec(action?.metadata?.raw_spec);
-    if (!parsed.spec) {
-      return action;
-    }
-    try {
-      const { functionSignatures } = openapiToFunction(parsed.spec, true);
-      return { ...action, functions: functionSignatures };
-    } catch {
-      return action;
-    }
-  });
-  if (filters?.actionMetadata?.pii == null) {
-    return withFunctions;
-  }
-  return Promise.all(
-    withFunctions.map(async (action) => ({
-      ...action,
-      metadata: await decryptMetadata(action.metadata),
-    })),
-  );
-}
-
-async function getResumeMemorySnapshots({ appConfig, user, agents, primaryAgent }) {
-  if (
-    appConfig?.filters?.memories?.pii == null ||
-    !isMemoryEnabled(appConfig?.memory) ||
-    user?.personalization?.memories === false
-  ) {
-    return [];
-  }
-  const canReadMemory = await checkAccess({
-    user,
-    permissionType: PermissionTypes.MEMORIES,
-    permissions: [Permissions.USE],
-    getRoleByName,
-  });
-  if (!canReadMemory) {
-    return [];
-  }
-
-  const inlineMemoryAvailable =
-    new Set(appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities).has(
-      AgentCapabilities.memory,
-    ) &&
-    (await checkAccess({
-      user,
-      permissionType: PermissionTypes.MEMORIES,
-      permissions: [Permissions.USE, Permissions.CREATE, Permissions.UPDATE],
-      getRoleByName,
-    }));
-  const automaticMemoryEnabled = isMemoryAgentEnabled(appConfig.memory);
-  const partitionIds = new Set([getMemoryAgentId(primaryAgent)]);
-  for (const agent of agents) {
-    if (
-      agent.id !== primaryAgent.id &&
-      (automaticMemoryEnabled || (inlineMemoryAvailable && agentHasInlineMemoryTools(agent)))
-    ) {
-      partitionIds.add(getMemoryAgentId(agent));
-    }
-  }
-
-  const memories = await Promise.all(
-    [...partitionIds].map((agentId) =>
-      getUserMemories({
-        userId: user.id + '',
-        agentId,
-      }),
-    ),
-  );
-  return memories.flat();
-}
-
-async function assertResumeAgentContentAllowed({ appConfig, endpointOption, user, req }) {
-  if (!hasResumeAgentProtection(appConfig)) {
-    return;
-  }
-  const primaryAgent = await endpointOption?.agent;
-  if (!primaryAgent) {
-    throw new ContentTraversalLimitError();
-  }
-  const additionalRoots = await getResumeAdditionalAgentRoots(req, endpointOption);
-  const subagentsEnabled = new Set(appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities).has(
-    AgentCapabilities.subagents,
-  );
-  const agents = await getResumeAgentSnapshot({
-    primaryAgent,
-    additionalRoots,
-    primaryModelParameters: endpointOption?.model_parameters,
-    subagentsEnabled,
-    getAgent,
-    canAccessAgent: async (agent) =>
-      checkPermission({
-        userId: user.id,
-        role: user.role,
-        resourceType: ResourceType.AGENT,
-        resourceId: agent._id,
-        requiredPermission: PermissionBits.VIEW,
-      }),
-  });
-  const memoryAgent = hasResumeAgentDefinitionProtection(appConfig)
-    ? await getResumeMemoryAgent(appConfig, primaryAgent)
-    : null;
-  const [actions, memories] = await Promise.all([
-    getResumeActionSnapshots(appConfig?.filters, agents),
-    getResumeMemorySnapshots({
-      appConfig,
-      user,
-      agents,
-      primaryAgent: agents[0],
-    }),
-  ]);
-  const definitionAgents =
-    memoryAgent && !agents.some((agent) => agent.id === memoryAgent.id)
-      ? [...agents, memoryAgent]
-      : agents;
-  assertModelBoundContent({
-    filters: appConfig?.filters,
-    legacyPii: appConfig?.messageFilter?.pii,
-    agents: definitionAgents.map(projectResumeAgentDefinition),
-    actions,
-    memories,
-  });
-}
-
-async function assertResumeContentAllowed({
-  appConfig,
-  endpointOption,
-  conversationId,
-  targetMessageId,
-  user,
-  storedMessages,
-  seedContent,
-  resumeValue,
-  liveFiles,
-  isTemporary,
-  checkpointNamespace,
-  req,
-}) {
-  if (!hasResumeContentProtection(appConfig)) {
-    return;
-  }
-
-  let checkpointMessages = [];
-  if (hasResumeHistoryProtection(appConfig)) {
-    try {
-      checkpointMessages = await getResumeCheckpointMessages(
-        appConfig,
-        conversationId,
-        checkpointNamespace,
-      );
-    } catch {
-      throw new ContentTraversalLimitError();
-    }
-  }
-
-  const checkpointUserMessages = [];
-  const checkpointSkills = [];
-  for (const message of checkpointMessages) {
-    const skill = getCheckpointSkill(message);
-    if (skill != null) {
-      checkpointSkills.push(skill);
-      continue;
-    }
-    if (getCheckpointMessageRole(message) === 'user') {
-      checkpointUserMessages.push({
-        ...message,
-        role: 'user',
-        content: message?.content ?? message?.text,
-      });
-    }
-  }
-
-  if (hasResumeHistoryProtection(appConfig)) {
-    const contentInspection = await getResumeContentInspection({
-      appConfig,
-      conversationId,
-      targetMessageId,
-      user,
-      supplementalMessages: storedMessages,
-      submittedMessages: checkpointUserMessages,
-      liveFiles,
-      isTemporary,
-      getMessages,
-      getFiles,
-    });
-    assertModelBoundContent({
-      filters: appConfig?.filters,
-      legacyPii: appConfig?.messageFilter?.pii,
-      submittedMessages: contentInspection.submittedMessages,
-      storedMessages: contentInspection.storedMessages,
-      skills: checkpointSkills,
-      resolvedFiles: contentInspection.hydratedFiles,
-    });
-    assertResumeToolContentAllowed(
-      appConfig?.filters,
-      checkpointMessages,
-      seedContent,
-      resumeValue,
-    );
-  }
-  await assertResumeAgentContentAllowed({
-    appConfig,
-    endpointOption,
-    user,
-    req,
-  });
-}
-
-function getUserFacingResumeError(error, appConfig) {
-  if (hasResumeContentProtection(appConfig)) {
-    return GENERIC_RESUME_ERROR;
-  }
-  return typeof error?.message === 'string' ? error.message : GENERIC_RESUME_ERROR;
-}
-
-const mergeUserSubmittedPaths = (...pathLists) => [
-  ...new Set(
-    pathLists
-      .flat()
-      .filter((path) => typeof path === 'string' && path.startsWith('/') && path.length <= 2048),
-  ),
-];
-
-/**
- * Map user decisions back to the exact assistant content fields they can
- * mutate. `respond`/`reject` and ask answers are human prose; edited tool
- * arguments retain tool-argument semantics on replay.
- */
-function getResumeUserSubmittedPaths(content, pendingAction, body) {
-  const paths = [];
-  const parts = Array.isArray(content) ? content : [];
-  for (let index = 0; index < parts.length; index++) {
-    if (parts[index]?.type === 'steer') {
-      paths.push(`/content/${index}`);
-    }
-  }
-
-  const payload = pendingAction?.payload;
-  if (payload?.type === 'ask_user_question') {
-    for (let index = parts.length - 1; index >= 0; index--) {
-      if (parts[index]?.tool_call?.name === ASK_USER_QUESTION_TOOL_NAME) {
-        paths.push(`/content/${index}/tool_call/output`);
-        break;
-      }
-    }
-    return paths;
-  }
-  if (payload?.type !== 'tool_approval') {
-    return paths;
-  }
-
-  const resolutions = new Map(
-    (Array.isArray(body?.decisions) ? body.decisions : []).map((decision) => [
-      decision.tool_call_id,
-      decision,
-    ]),
-  );
-  for (let index = 0; index < parts.length; index++) {
-    const toolCall = parts[index]?.tool_call;
-    const resolution = resolutions.get(toolCall?.id);
-    if (resolution?.decision === 'edit') {
-      paths.push(`/content/${index}/tool_call/args`);
-    } else if (resolution?.decision === 'respond' || resolution?.decision === 'reject') {
-      paths.push(`/content/${index}/tool_call/output`);
-    }
-  }
-  return paths;
-}
+};
 
 /**
  * How long a resume waits on best-effort steering bookkeeping before answering
@@ -734,6 +219,10 @@ async function persistRePauseProgress({ req, client, job, streamId, conversation
     meta.userSubmittedPaths,
     getResumeUserSubmittedPaths(content, meta.pendingAction, req.body),
   );
+  const userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
+    meta.userSubmittedMessageFieldPaths,
+    getResumeUserSubmittedMessageFieldPaths(content, meta.pendingAction, req.body),
+  );
   const attachments = await resolveAccumulatedAttachments({
     client,
     conversationId,
@@ -754,6 +243,7 @@ async function persistRePauseProgress({ req, client, job, streamId, conversation
       ...(content.length > 0 && { content }),
       ...(attachments.length > 0 && { attachments }),
       ...(userSubmittedPaths.length > 0 && { userSubmittedPaths }),
+      ...(userSubmittedMessageFieldPaths.length > 0 && { userSubmittedMessageFieldPaths }),
       unfinished: true,
       user: userId,
     },
@@ -875,6 +365,10 @@ async function finalizeResumedTurn({
     meta.userSubmittedPaths,
     getResumeUserSubmittedPaths(content, meta.pendingAction, req.body),
   );
+  const userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
+    meta.userSubmittedMessageFieldPaths,
+    getResumeUserSubmittedMessageFieldPaths(content, meta.pendingAction, req.body),
+  );
 
   /**
    * A resumed segment can end on an empty preempt boundary just as a fresh
@@ -901,6 +395,7 @@ async function finalizeResumedTurn({
     isCreatedByUser: false,
     user: userId,
     ...(userSubmittedPaths.length > 0 && { userSubmittedPaths }),
+    ...(userSubmittedMessageFieldPaths.length > 0 && { userSubmittedMessageFieldPaths }),
   };
   if (meta.agent_id ?? req.body?.agent_id) {
     responseMessage.agent_id = meta.agent_id ?? req.body.agent_id;
@@ -1282,11 +777,17 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
 
   let seedContent;
   let userSubmittedPaths;
+  let userSubmittedMessageFieldPaths;
   let storedMessages;
   let resumeState;
   try {
     resumeState = await GenerationJobManager.getResumeState(streamId, job.createdAt);
     seedContent = resumeState?.aggregatedContent ?? [];
+    const currentUserSubmittedMessageFieldPaths = getResumeUserSubmittedMessageFieldPaths(
+      seedContent,
+      pendingAction,
+      req.body,
+    );
     if (pendingAction.payload?.type === 'ask_user_question') {
       seedContent = attachAskUserQuestionAnswer(
         seedContent,
@@ -1298,6 +799,10 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
     userSubmittedPaths = mergeUserSubmittedPaths(
       job.metadata.userSubmittedPaths,
       getResumeUserSubmittedPaths(seedContent, pendingAction, req.body),
+    );
+    userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
+      job.metadata.userSubmittedMessageFieldPaths,
+      currentUserSubmittedMessageFieldPaths,
     );
     storedMessages = job.metadata.userMessage
       ? [
@@ -1314,23 +819,27 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
             role: 'assistant',
             content: seedContent,
             userSubmittedPaths,
+            userSubmittedMessageFieldPaths,
           },
         ]
       : [];
-    await assertResumeContentAllowed({
-      appConfig: req.config,
-      endpointOption: req.body.endpointOption,
-      conversationId,
-      targetMessageId: job.metadata.userMessage?.messageId,
-      user: req.user,
-      storedMessages,
-      seedContent,
-      resumeValue: mapped.resumeValue,
-      liveFiles: Array.isArray(req.body.files) ? req.body.files : [],
-      isTemporary: (job.metadata.isTemporary ?? req.body?.isTemporary) === true,
-      checkpointNamespace,
-      req,
-    });
+    await assertResumeContentAllowed(
+      {
+        appConfig: req.config,
+        endpointOption: req.body.endpointOption,
+        conversationId,
+        targetMessageId: job.metadata.userMessage?.messageId,
+        user: req.user,
+        storedMessages,
+        seedContent,
+        resumeValue: mapped.resumeValue,
+        liveFiles: Array.isArray(req.body.files) ? req.body.files : [],
+        isTemporary: (job.metadata.isTemporary ?? req.body?.isTemporary) === true,
+        checkpointNamespace,
+        resolvedAddedAgent: req.resolvedAddedAgent,
+      },
+      resumeContentProtectionDependencies,
+    );
   } catch (err) {
     logger.warn(
       '[ResumeAgentController] Resume content preflight failed',
@@ -1508,9 +1017,19 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
   try {
     if (userSubmittedPaths.length > 0) {
       job.metadata.userSubmittedPaths = userSubmittedPaths;
+    }
+    if (userSubmittedMessageFieldPaths.length > 0) {
+      job.metadata.userSubmittedMessageFieldPaths = userSubmittedMessageFieldPaths;
+    }
+    if (userSubmittedPaths.length > 0 || userSubmittedMessageFieldPaths.length > 0) {
       await GenerationJobManager.getJobStore().updateJob(
         streamId,
-        { userSubmittedPaths },
+        {
+          ...(userSubmittedPaths.length > 0 && { userSubmittedPaths }),
+          ...(userSubmittedMessageFieldPaths.length > 0 && {
+            userSubmittedMessageFieldPaths,
+          }),
+        },
         job.createdAt,
       );
     }

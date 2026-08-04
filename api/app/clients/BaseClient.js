@@ -13,6 +13,7 @@ const {
   encodeAndFormatVideos,
   encodeAndFormatDocuments,
   assertModelBoundContent,
+  hasActiveFilePolicy,
   resolveCanonicalFileReferences,
   getLangfuseTraceDestinationIds,
   isLangfuseTraceSampled,
@@ -31,6 +32,7 @@ const {
   isEphemeralAgentId,
   supportsBalanceCheck,
   isBedrockDocumentType,
+  HITL_MESSAGE_FILTER_FIELDS,
   getEndpointFileConfig,
 } = require('librechat-data-provider');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
@@ -94,6 +96,29 @@ const mergeUserSubmittedPaths = (...pathLists) => [
       .filter((path) => typeof path === 'string' && path.startsWith('/') && path.length <= 2048),
   ),
 ];
+const hitlMessageFilterFields = new Set(HITL_MESSAGE_FILTER_FIELDS);
+const mergeUserSubmittedMessageFieldPaths = (...entryLists) => {
+  const entries = [];
+  const seen = new Set();
+  for (const entry of entryLists.flat()) {
+    if (
+      entry == null ||
+      typeof entry.path !== 'string' ||
+      !entry.path.startsWith('/') ||
+      entry.path.length > 2048 ||
+      !hitlMessageFilterFields.has(entry.field)
+    ) {
+      continue;
+    }
+    const key = `${entry.field}:${entry.path}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    entries.push(entry);
+  }
+  return entries;
+};
 
 const buildOwnerFileFilter = (fileIds, user) => {
   if (!user?.id || fileIds.length === 0) {
@@ -641,7 +666,7 @@ class BaseClient {
         : Array.from(this.authorizedHistoricalFiles?.values?.() ?? []);
     if (
       this.options.resendFiles !== false &&
-      appConfig?.filters?.files?.pii != null &&
+      hasActiveFilePolicy(appConfig?.filters) &&
       this.authorizedHistoricalFiles == null
     ) {
       const fileInspection = await resolveCanonicalFileReferences({
@@ -838,6 +863,7 @@ class BaseClient {
 
     if (Array.isArray(responseMessage.content)) {
       const userSubmittedPaths = [];
+      const userSubmittedMessageFieldPaths = [];
       for (let index = 0; index < responseMessage.content.length; index++) {
         if (responseMessage.content[index]?.type === ContentTypes.STEER) {
           userSubmittedPaths.push(`/content/${index}`);
@@ -847,6 +873,12 @@ class BaseClient {
         userSubmittedPaths.push(
           ...(editedSourceMessage.userSubmittedPaths ?? []).filter((path) => {
             const match = /^\/content\/(\d+)(?:\/|$)/.exec(path);
+            return match != null && Number(match[1]) < editedSourceContentLength;
+          }),
+        );
+        userSubmittedMessageFieldPaths.push(
+          ...(editedSourceMessage.userSubmittedMessageFieldPaths ?? []).filter((entry) => {
+            const match = /^\/content\/(\d+)(?:\/|$)/.exec(entry?.path);
             return match != null && Number(match[1]) < editedSourceContentLength;
           }),
         );
@@ -868,6 +900,11 @@ class BaseClient {
       }
       if (userSubmittedPaths.length > 0) {
         responseMessage.userSubmittedPaths = mergeUserSubmittedPaths(userSubmittedPaths);
+      }
+      if (userSubmittedMessageFieldPaths.length > 0) {
+        responseMessage.userSubmittedMessageFieldPaths = mergeUserSubmittedMessageFieldPaths(
+          userSubmittedMessageFieldPaths,
+        );
       }
     }
 
@@ -1590,7 +1627,7 @@ class BaseClient {
     const historicalFileIds = collectHistoricalFileIds(_messages);
     const authorizedFilesById = new Map();
     const filters = this.options.req?.config?.filters;
-    if (filters?.files?.pii != null) {
+    if (hasActiveFilePolicy(filters)) {
       const fileInspection = await resolveCanonicalFileReferences({
         filters,
         input: _messages,

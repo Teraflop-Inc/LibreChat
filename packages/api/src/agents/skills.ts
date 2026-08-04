@@ -31,6 +31,8 @@ export type TGetSkillByName = (
   name: string;
   body: string;
   author: Types.ObjectId;
+  /** Structured SKILL.md metadata retained for model-bound policy checks. */
+  frontmatter?: Record<string, unknown>;
   /**
    * Skill-declared tool allowlist, forwarded verbatim from the skill doc.
    * Surfaced so the resolver can carry it onto `ResolvedManualSkill` for
@@ -781,6 +783,8 @@ export interface ResolveManualSkillsParams {
     body: string;
     author: Types.ObjectId | string;
     deployment?: boolean;
+    /** Structured SKILL.md metadata retained for model-bound policy checks. */
+    frontmatter?: Record<string, unknown>;
     /**
      * Skill-declared tool allowlist, forwarded verbatim from the skill doc.
      * Surfaced on `ResolvedManualSkill` so future runtime enforcement can
@@ -825,6 +829,8 @@ export interface ResolvedSkillPrime {
   _id: Types.ObjectId;
   name: string;
   body: string;
+  /** Structured SKILL.md metadata retained for model-bound policy checks. */
+  frontmatter?: Record<string, unknown>;
   /**
    * Skill-declared tool allowlist passed through from the skill doc. Present
    * only when the skill author declared `allowed-tools` in frontmatter.
@@ -957,6 +963,7 @@ export async function resolveManualSkills(
           _id: skill._id,
           name: skill.name,
           body: skill.body,
+          frontmatter: skill.frontmatter,
         };
         if (skill.allowedTools !== undefined) {
           resolved.allowedTools = skill.allowedTools;
@@ -990,6 +997,7 @@ export interface ResolveAlwaysApplySkillsParams {
       name: string;
       body: string;
       author: Types.ObjectId | string;
+      frontmatter?: Record<string, unknown>;
       allowedTools?: string[];
       deployment?: boolean;
     }>;
@@ -1115,6 +1123,7 @@ export async function resolveAlwaysApplySkills(
         _id: skill._id,
         name: skill.name,
         body: skill.body,
+        frontmatter: skill.frontmatter,
       };
       if (skill.allowedTools !== undefined) {
         prime.allowedTools = skill.allowedTools;

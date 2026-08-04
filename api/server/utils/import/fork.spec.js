@@ -1276,6 +1276,7 @@ describe('cloneMessagesWithTimestamps', () => {
         text: 'Mixed assistant prose',
         isCreatedByUser: false,
         userSubmittedPaths: ['/content/1/steer'],
+        userSubmittedMessageFieldPaths: [{ path: '/content/0/tool_call/output', field: 'answer' }],
       },
     ];
     const importBatchBuilder = createImportBatchBuilder('testUser');
@@ -1291,7 +1292,10 @@ describe('cloneMessagesWithTimestamps', () => {
     ).not.toHaveProperty('isUserSubmitted');
     expect(
       importBatchBuilder.messages.find((message) => message.text === 'Mixed assistant prose'),
-    ).toMatchObject({ userSubmittedPaths: ['/content/1/steer'] });
+    ).toMatchObject({
+      userSubmittedPaths: ['/content/1/steer'],
+      userSubmittedMessageFieldPaths: [{ path: '/content/0/tool_call/output', field: 'answer' }],
+    });
   });
 
   test('should maintain proper timestamp order between parent and child messages', () => {

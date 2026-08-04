@@ -74,6 +74,10 @@ describe('Share Methods', () => {
           type: [String],
           default: undefined,
         },
+        userSubmittedMessageFieldPaths: {
+          type: [mongoose.Schema.Types.Mixed],
+          default: undefined,
+        },
         model: String,
         iconURL: String,
         endpoint: String,
@@ -475,6 +479,9 @@ describe('Share Methods', () => {
           isCreatedByUser: false,
           isUserSubmitted: true,
           userSubmittedPaths: ['/text'],
+          userSubmittedMessageFieldPaths: [
+            { path: '/content/0/tool_call/output', field: 'decision_reason' },
+          ],
           model: 'gpt-4',
           parentMessageId: Constants.NO_PARENT,
         },
@@ -509,11 +516,23 @@ describe('Share Methods', () => {
       expect(
         result?.messages.find((message) => message.text === 'World')?.userSubmittedPaths,
       ).toEqual(['/text']);
+      expect(
+        result?.messages.find((message) => message.text === 'World')
+          ?.userSubmittedMessageFieldPaths,
+      ).toEqual([
+        expect.objectContaining({
+          path: '/content/0/tool_call/output',
+          field: 'decision_reason',
+        }),
+      ]);
       expect(result?.messages.find((message) => message.text === 'Hello')).not.toHaveProperty(
         'isUserSubmitted',
       );
       expect(result?.messages.find((message) => message.text === 'Hello')).not.toHaveProperty(
         'userSubmittedPaths',
+      );
+      expect(result?.messages.find((message) => message.text === 'Hello')).not.toHaveProperty(
+        'userSubmittedMessageFieldPaths',
       );
     });
 

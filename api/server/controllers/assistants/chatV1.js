@@ -8,6 +8,7 @@ const {
   getBalanceConfig,
   getModelMaxTokens,
   isContentFilterError,
+  hasActiveFilePolicy,
   preflightAssistantRunContent,
   preflightAssistantUserMessageContent,
 } = require('@librechat/api');
@@ -454,7 +455,7 @@ const chatV1 = async (req, res) => {
 
     /** @type {Promise<Run>|undefined} */
     let userMessagePromise;
-    const inspectFinalMessageFiles = req.config?.filters?.files?.pii != null;
+    const inspectFinalMessageFiles = hasActiveFilePolicy(req.config?.filters);
 
     const initializeThread = async () => {
       /** @type {undefined | MongoFile[]} */

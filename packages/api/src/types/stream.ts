@@ -1,4 +1,4 @@
-import type { Agents } from 'librechat-data-provider';
+import type { Agents, UserSubmittedMessageFieldPath } from 'librechat-data-provider';
 import type { EventEmitter } from 'events';
 import type { ServerSentEvent } from './events';
 
@@ -17,6 +17,8 @@ export interface GenerationJobMetadata {
   responseMessageId?: string;
   /** Exact assistant-message fields authored by the user during this running job. */
   userSubmittedPaths?: string[];
+  /** Exact HITL message-filter fields embedded at those assistant-message paths. */
+  userSubmittedMessageFieldPaths?: UserSubmittedMessageFieldPath[];
   /** Sender label for the response (e.g., "GPT-4.1", "Claude") */
   sender?: string;
   /** Endpoint identifier for abort handling */
