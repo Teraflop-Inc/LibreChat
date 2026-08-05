@@ -1,0 +1,103 @@
+/* UUH brand overlay — CWORK-1111
+ *
+ * PLACEHOLDER. Colours and marks scraped from uofuhealth.utah.edu on 2026-08-05
+ * because UUH's official asset pack (requested 22 Jul, chased in the recap) had
+ * not arrived and the ticket says explicitly: do not wait. Replace wholesale
+ * when the real pack lands.
+ *
+ * These are University of Utah Health trademarks. Fine for demonstrating back
+ * to UUH; not for publication or reuse.
+ *
+ * ── WHY THIS FILE EXISTS AT ALL ───────────────────────────────────────────
+ * CWORK-1111 states colours require a frontend rebuild of client/src/style.css.
+ * That turns out not to be necessary: LibreChat v0.8.7 defines its palette as
+ * CSS custom properties, so redefining them in a later stylesheet re-themes the
+ * app with NO source edit and NO rebuild.
+ *
+ * That matters more than the colours do. style.css is one of the most churned
+ * files upstream (v0.8.5 sidebar redesign, v0.8.7 settings redesign) against
+ * roughly monthly releases carrying heavy security content. Editing it is what
+ * forces a hard fork, and a health system on a stale fork inherits that
+ * exposure. This file touches nothing upstream ships.
+ *
+ * Source of truth for the palette — CSS variables read live from the UUH site:
+ *   --nav-primary-item-active-color  #BE0000   crimson, primary
+ *   --color-blue-topaz               #9DD8D7   secondary accent
+ *   --color-gray-2                   #C5C5C6
+ *   --alert-warning-background       #F4F4F5
+ */
+
+:root,
+.dark {
+  /* UUH crimson replaces LibreChat's purple accent. */
+  --brand-purple: #be0000;
+
+  /* Primary action / send button: LibreChat ships green. */
+  --surface-submit: #be0000;
+  --surface-submit-hover: #9a0000;
+
+  /* Focus rings and selected states pick up the crimson. */
+  --ring: 0 72% 37%;
+}
+
+/* Secondary accent — UUH "blue topaz", used sparingly for informational
+ * emphasis so the interface is not monochrome crimson. */
+:root {
+  --uuh-topaz: #9dd8d7;
+  --uuh-crimson: #be0000;
+  --uuh-crimson-dark: #9a0000;
+  --uuh-gray: #c5c5c6;
+}
+
+/* The scraped logo is white-fill, drawn for a dark or crimson field. On a light
+ * background it would be invisible, so give it a crimson plate rather than
+ * shipping an unreadable mark. */
+img[src*="logo.svg"] {
+  background-color: var(--uuh-crimson);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+/* ── Targeted rules ────────────────────────────────────────────────────────
+ * Redefining custom properties alone does NOT re-theme this build. Verified:
+ * the send button is `bg-text-primary`, not `bg-surface-submit`, so overriding
+ * --surface-submit changes nothing visible; and overriding --text-primary to
+ * crimson would repaint all body text. The primary actions therefore need
+ * explicit selectors.
+ *
+ * These target behaviour-stable hooks (aria-label, type=submit) rather than
+ * Tailwind utility classes, which churn between releases.
+ */
+
+/* Primary send action — crimson when enabled, untouched when disabled so the
+ * disabled state still reads as unavailable. */
+button[aria-label*="Send" i]:not(:disabled),
+button[data-testid="send-button"]:not(:disabled) {
+  background-color: var(--uuh-crimson) !important;
+  color: #fff !important;
+}
+button[aria-label*="Send" i]:not(:disabled):hover,
+button[data-testid="send-button"]:not(:disabled):hover {
+  background-color: var(--uuh-crimson-dark) !important;
+}
+
+/* Login / primary submit buttons. */
+form button[type="submit"] {
+  background-color: var(--uuh-crimson) !important;
+  color: #fff !important;
+}
+form button[type="submit"]:hover {
+  background-color: var(--uuh-crimson-dark) !important;
+}
+
+/* Keyboard focus — accessibility matters and it is a cheap brand touch. */
+:focus-visible {
+  outline-color: var(--uuh-crimson) !important;
+}
+
+/* Selected conversation in the sidebar gets a crimson leading rule, so the
+ * brand reads even on screens with no primary action visible. */
+nav a[aria-current="page"],
+[role="listitem"][data-active="true"] {
+  border-left: 3px solid var(--uuh-crimson);
+}

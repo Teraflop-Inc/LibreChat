@@ -13,6 +13,16 @@
 version: 1.3.13
 cache: true
 
+# Branding (CWORK-1111). App title and footer live in .env; the palette and
+# marks are applied by deploy/uuh/branding/. Note there is NO theming block in
+# librechat.yaml for v0.8.7 — colours are done via CSS custom properties, see
+# deploy/uuh/branding/uuh-brand.css.
+interface:
+  # Single line deliberately. LibreChat collapses newlines in customWelcome, so
+  # a multi-paragraph string renders as run-together sentences
+  # ("...Health AI.Ask about..."). Keep it to one sentence that reads correctly.
+  customWelcome: 'Welcome to University of Utah Health AI — ask about denied claims, clinical documentation, or payer policy. Demonstration environment; all records are synthetic.'
+
 # File upload limits for the demo corpus (CWORK-1109 — synthetic
 # insurance-denial docs, ~20 files). Defaults are conservative; these are
 # sized for the demo, not for production tenancy.

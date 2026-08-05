@@ -62,6 +62,11 @@ retrieval-baseline:
 test: query-set corpus
 	@bash $(ROOT)/deploy/uuh/demo/mutation_test.sh
 
+## brand — apply UUH branding to the running container (CWORK-1111).
+## Re-run after any `up --force-recreate`; a fresh container layer discards it.
+brand:
+	@bash $(ROOT)/deploy/uuh/branding/apply-branding.sh
+
 ## upstream-drift — our changes must stay confined to deploy/uuh
 upstream-drift:
 	@git -C $(ROOT) fetch upstream --quiet
