@@ -4,7 +4,7 @@
 ROOT := $(shell git rev-parse --show-toplevel)
 COMPOSE := docker compose -f $(ROOT)/docker-compose.yml -f $(ROOT)/deploy/uuh/docker-compose.uuh.yml
 
-.PHONY: up down restart ps logs verify upstream-drift
+.PHONY: up down restart ps logs verify upstream-drift query-set test
 
 up:
 	cd $(ROOT) && $(COMPOSE) up -d
@@ -36,6 +36,14 @@ verify:
 	@echo "── pgvector ──"
 	@docker exec vectordb psql -U myuser -d mydatabase -tAc \
 		"SELECT 'pgvector '||extversion FROM pg_extension WHERE extname='vector';"
+
+## query-set — validate the CWORK-1108 demo query set contract
+query-set:
+	@uv run --quiet --with pyyaml $(ROOT)/deploy/uuh/demo/validate_query_set.py
+
+## test — query-set contract + proof the validator actually has teeth
+test: query-set
+	@bash $(ROOT)/deploy/uuh/demo/mutation_test.sh
 
 ## upstream-drift — our changes must stay confined to deploy/uuh
 upstream-drift:

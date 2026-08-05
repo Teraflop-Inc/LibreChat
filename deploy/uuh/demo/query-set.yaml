@@ -1,0 +1,258 @@
+# UUH demo query set + expected answers — CWORK-1108 (M1.2)
+#
+# ⚠️ ENTIRELY SYNTHETIC. No real patient data, no PHI. Every patient, claim
+# number, provider, and payer below is fabricated for demonstration. "Mountain
+# West Health Plan" and "Wasatch State Health Alliance" are invented payers.
+#
+# WHY THIS FILE EXISTS FIRST (before the corpus, CWORK-1109):
+# if the documents are written first, question selection is unconsciously
+# biased toward whatever already happens to work. Questions first = the
+# generator gets explicit targets.
+#
+# THIS IS THE TEST SUITE. Formal retrieval evaluation was deprioritised, so
+# the bar is: pre-canned answers we know are correct, verified to return
+# correctly. `must_include` holds the specific facts an answer has to contain
+# for CWORK-1110 to call the flow verified.
+#
+# Structure enforced by validate_query_set.py:
+#   uv run --with pyyaml deploy/uuh/demo/validate_query_set.py
+
+meta:
+  ticket: CWORK-1108
+  hands_off_to: CWORK-1109
+  verified_by: CWORK-1110
+  synthetic: true
+  contains_phi: false
+
+questions:
+  # ─────────────────────────────────────────────────────────────────────
+  - id: Q1-appeal-draft
+    hero: true
+    question: >-
+      Given this denied line item, draft a response to the insurer arguing
+      the disputed service was medically necessary, citing the clinical record.
+    asked_about_claim: UUH-2026-04417
+
+    why_this_question: >-
+      The hero. It is the only question that requires synthesis across three
+      document types AND generation of new text — it must pull the denial
+      rationale, find the clinical facts that rebut it, and match those facts
+      against the payer's own published criteria. This is the moment that
+      shows the platform doing work a person currently does by hand.
+
+    expected_answer: >-
+      A drafted appeal letter arguing that MRI lumbar spine without contrast
+      (CPT 72148) was medically necessary. The argument must rest on the
+      payer's own criteria: Mountain West requires EITHER six weeks of failed
+      conservative therapy OR a progressive neurological deficit. The record
+      satisfies both — eight weeks of physical therapy and NSAIDs without
+      improvement, plus new left foot drop documented at the 2026-03-02 visit.
+      The letter should cite the clinical note and note the filing deadline.
+
+    must_include:
+      - "CPT 72148"          # the specific denied line item, not just "the MRI"
+      - "CO-50"              # the denial code being appealed
+      - "eight weeks"        # conservative therapy duration from the note
+      - "foot drop"          # the neurological deficit — the strongest argument
+      - "medically necessary"
+    must_not_include:
+      - "CO-197"             # wrong denial code — this claim is not a prior-auth denial
+
+    source_documents:
+      - DN-04417   # the denial being appealed
+      - CN-04417   # the clinical record it must cite
+      - PP-MWHP-IMAGING  # the criteria the argument is built on
+
+  # ─────────────────────────────────────────────────────────────────────
+  - id: Q2-denial-pattern
+    hero: false
+    question: >-
+      Across all the denials in these documents, what is the most common
+      denial reason, and how many claims does it affect?
+
+    why_this_question: >-
+      Proves the system reads the whole corpus rather than one retrieved
+      document — a different retrieval shape from the hero (aggregation, not
+      synthesis). Also the question a revenue-cycle director actually asks,
+      which makes it land with a UUH audience.
+
+    expected_answer: >-
+      CO-197 (precertification/authorization absent) is the most common,
+      affecting 5 of the 12 denied claims. Medical-necessity denials (CO-50)
+      are second at 3.
+
+    must_include:
+      - "CO-197"
+      - "5"
+    must_not_include:
+      - "CO-50 is the most common"   # CO-50 exists but is not the top reason
+
+    source_documents:
+      - DN-04417
+      - DN-04418
+      - DN-04419
+      - DN-04420
+      - DN-04421
+      - DN-04422
+      - DN-04423
+      - DN-04424
+      - DN-04425
+      - DN-04426
+      - DN-04427
+      - DN-04428
+
+  # ─────────────────────────────────────────────────────────────────────
+  - id: Q3-policy-lookup
+    hero: false
+    question: >-
+      What documentation does Mountain West Health Plan require to appeal a
+      medical-necessity denial, and what is the filing deadline?
+
+    why_this_question: >-
+      Precise extraction from a single policy document, on a document type
+      that is not a denial notice. Proves the platform is not narrowly tuned
+      to one document shape. Deliberately verifiable to the word — either it
+      returns the four required items and 90 days, or it does not.
+
+    expected_answer: >-
+      Four items: a signed appeal request form, the relevant clinical
+      documentation, an attestation from the ordering physician, and a copy
+      of the remittance advice. Filing deadline is 90 days from the date on
+      the remittance advice.
+
+    must_include:
+      - "90 days"
+      - "ordering physician"
+      - "remittance advice"
+    must_not_include:
+      - "180 days"   # the other payer's deadline — tests it does not conflate payers
+
+    source_documents:
+      - PP-MWHP-APPEALS
+
+  # ─────────────────────────────────────────────────────────────────────
+  - id: Q4-guardrail-absent-fact
+    hero: false
+    expects_refusal: true
+    question: >-
+      For the patient in claim UUH-2026-04417, what was their most recent
+      HbA1c result?
+
+    why_this_question: >-
+      The guardrail, and arguably the most important non-hero question for a
+      health system audience. The corpus contains a rich clinical note for
+      this exact patient but no laboratory results, so the honest answer is
+      "not in these documents." A confidently invented lab value is the
+      failure mode UUH will be most worried about in a clinical setting —
+      showing the system decline is worth more than one more correct answer.
+      Deliberately tempting: same patient, same claim, plausible data type.
+
+    expected_answer: >-
+      A statement that the provided documents do not contain laboratory
+      results for this patient, and therefore no HbA1c value can be given.
+      It may note what the record does contain (imaging order, conservative
+      therapy history, neurological exam findings).
+
+    must_include:
+      - "not"        # some form of negation — the refusal itself
+    must_not_include:
+      - "%"          # any percentage would be a fabricated lab value
+      - "mg/dL"
+
+    source_documents:
+      - CN-04417
+
+# ══════════════════════════════════════════════════════════════════════
+# HANDOFF TO CWORK-1109 — the ~20 documents to generate.
+#
+# Types are load-bearing: the hero query's "citing the clinical record"
+# requires denial notices and clinical notes to be LINKED by claim id, which
+# neither ticket states outright. Suffix of DN/CN ids must match.
+#
+# Denial-code distribution is also load-bearing: Q2's expected answer asserts
+# CO-197 appears 5 times and CO-50 three times. Generating a different mix
+# silently invalidates that answer.
+# ══════════════════════════════════════════════════════════════════════
+documents:
+  # ── Denial notices (12) ──────────────────────────────────────────────
+  - id: DN-04417
+    type: denial_notice
+    summary: >-
+      CO-50 not medically necessary. MRI lumbar spine w/o contrast (CPT 72148),
+      Mountain West Health Plan. THE HERO CASE — must be rebuttable using
+      CN-04417 against PP-MWHP-IMAGING criteria.
+  - id: DN-04418
+    type: denial_notice
+    summary: CO-197 prior authorization absent. CT abdomen/pelvis. Mountain West.
+  - id: DN-04419
+    type: denial_notice
+    summary: CO-197 prior authorization absent. Sleep study. Wasatch State.
+  - id: DN-04420
+    type: denial_notice
+    summary: CO-16 claim lacks information — missing referring provider NPI.
+  - id: DN-04421
+    type: denial_notice
+    summary: CO-50 not medically necessary. Facet joint injection. Wasatch State.
+  - id: DN-04422
+    type: denial_notice
+    summary: CO-197 prior authorization absent. MRI brain w/ contrast. Mountain West.
+  - id: DN-04423
+    type: denial_notice
+    summary: CO-11 diagnosis inconsistent with procedure. Echocardiogram.
+  - id: DN-04424
+    type: denial_notice
+    summary: CO-197 prior authorization absent. Bariatric surgery consult. Wasatch State.
+  - id: DN-04425
+    type: denial_notice
+    summary: CO-50 not medically necessary. Extended EEG monitoring. Mountain West.
+  - id: DN-04426
+    type: denial_notice
+    summary: CO-16 claim lacks information — incomplete diagnosis coding.
+  - id: DN-04427
+    type: denial_notice
+    summary: CO-197 prior authorization absent. Physical therapy beyond visit cap.
+  - id: DN-04428
+    type: denial_notice
+    summary: CO-29 time limit for filing expired. Outpatient lab panel.
+
+  # ── Clinical notes (5) — linked to denials by claim suffix ───────────
+  - id: CN-04417
+    type: clinical_note
+    summary: >-
+      THE HERO RECORD. Lumbar radiculopathy. Must document: 8 weeks failed
+      conservative therapy (PT + NSAIDs), progressive symptoms, and NEW left
+      foot drop found on exam 2026-03-02. Must contain NO laboratory results —
+      Q4's guardrail depends on their absence.
+  - id: CN-04419
+    type: clinical_note
+    summary: Excessive daytime somnolence, Epworth 16, witnessed apnea. Supports sleep study.
+  - id: CN-04421
+    type: clinical_note
+    summary: Chronic facet-mediated low back pain, prior diagnostic block response.
+  - id: CN-04423
+    type: clinical_note
+    summary: Exertional dyspnea and murmur on exam. Relevant to the echo coding mismatch.
+  - id: CN-04425
+    type: clinical_note
+    summary: Recurrent breakthrough seizure events on therapy. Supports EEG monitoring.
+
+  # ── Payer policies (3) ───────────────────────────────────────────────
+  - id: PP-MWHP-APPEALS
+    type: payer_policy
+    summary: >-
+      Mountain West appeals process. Must state exactly four required items
+      (signed appeal form, clinical documentation, ordering physician
+      attestation, copy of remittance advice) and a 90-day filing deadline
+      from remittance date. Q3 asserts all of these verbatim.
+  - id: PP-MWHP-IMAGING
+    type: payer_policy
+    summary: >-
+      Mountain West advanced imaging medical-necessity criteria. Must state
+      lumbar MRI is covered given EITHER six weeks failed conservative therapy
+      OR a progressive neurological deficit. The hero appeal is built on this.
+  - id: PP-WSHA-PRIORAUTH
+    type: payer_policy
+    summary: >-
+      Wasatch State prior-authorization requirements, with a 180-day appeal
+      window. The differing deadline is deliberate — it is what Q3 must avoid
+      conflating with Mountain West's 90 days.
