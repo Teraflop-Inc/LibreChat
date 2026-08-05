@@ -1,0 +1,84 @@
+# UUH LibreChat — FerretDB overlay (CWORK-1107 / CWORK-1112)
+#
+# Replaces LibreChat's stock MongoDB with FerretDB: the Apache-2.0,
+# Mongo-wire-compatible datastore that persists into PostgreSQL.
+# UUH gets no MongoDB Inc. vendor, no SSPL-licensed software, and no
+# Mongo binary in their environment — which is what makes this clear
+# procurement and security audit.
+#
+# Image pins mirror upstream's own FerretDB test compose at
+#   packages/data-schemas/misc/ferretdb/docker-compose.ferretdb.yml
+#
+# This file is a *separate directory* from anything upstream ships, so
+# `git rebase upstream/main` can never conflict on it.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f deploy/uuh/docker-compose.uuh.yml up -d
+# (or just `make -C deploy/uuh up`)
+
+services:
+  # Stock Mongo is replaced, not removed — upstream still declares it in
+  # docker-compose.yml, so we scale it to zero rather than editing that file.
+  mongodb:
+    deploy:
+      replicas: 0
+
+  ferretdb-postgres:
+    container_name: ferretdb-postgres
+    image: ghcr.io/ferretdb/postgres-documentdb:17-0.107.0-ferretdb-2.7.0
+    restart: on-failure
+    environment:
+      - POSTGRES_USER=ferretdb
+      - POSTGRES_PASSWORD=ferretdb
+      - POSTGRES_DB=postgres
+    volumes:
+      - ferretdb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ferretdb -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ferretdb:
+    container_name: ferretdb
+    image: ghcr.io/ferretdb/ferretdb:2.7.0
+    restart: on-failure
+    environment:
+      - FERRETDB_POSTGRESQL_URL=postgres://ferretdb:ferretdb@ferretdb-postgres:5432/postgres
+    depends_on:
+      ferretdb-postgres:
+        condition: service_healthy
+    # Exposed on 27020 to match upstream's test compose and to avoid
+    # colliding with any stock Mongo on the host's 27017.
+    ports:
+      - "27020:27017"
+
+  # LibreChat talks Mongo wire protocol to FerretDB instead of mongodb.
+  #
+  # NOTE: the base docker-compose.yml hardcodes
+  #   MONGO_URI=mongodb://mongodb:27017/LibreChat
+  # in api.environment. Container env beats the bind-mounted .env, so setting
+  # MONGO_URI in .env alone is NOT enough — it must be overridden here or the
+  # app silently keeps talking to stock Mongo.
+  api:
+    depends_on: !reset []
+    environment:
+      # FerretDB 2.x REQUIRES auth — the backing Postgres role doubles as the
+      # Mongo credential. Without creds LibreChat connects fine, then dies on
+      # the first query with "Command find requires authentication".
+      # Matches upstream's own FerretDB test URIs (jest.ferretdb.config.mjs).
+      - MONGO_URI=mongodb://ferretdb:ferretdb@ferretdb:27017/LibreChat
+      # Mirror upstream's no-proxy list with ferretdb added.
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,::1},${no_proxy:-},ferretdb,meilisearch,chat-meilisearch,rag_api,vectordb,host.docker.internal
+      - no_proxy=${no_proxy:-localhost,127.0.0.1,::1},${NO_PROXY:-},ferretdb,meilisearch,chat-meilisearch,rag_api,vectordb,host.docker.internal
+    volumes:
+      # Root-level librechat.yaml is gitignored upstream, so the canonical
+      # copy lives here (tracked) and is mounted straight in. Without this
+      # the server logs "Config file YAML format is invalid: ENOENT" at boot.
+      - type: bind
+        source: ./deploy/uuh/librechat.uuh.yaml
+        target: /app/librechat.yaml
+        read_only: true
+
+volumes:
+  ferretdb_data:

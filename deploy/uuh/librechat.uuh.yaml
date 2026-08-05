@@ -1,0 +1,29 @@
+# UUH LibreChat — demo configuration (CWORK-1107)
+#
+# Deliberately minimal. There is NO top-level `endpoints:` block here:
+# declaring one restricts LibreChat to only the endpoints listed, and the
+# demo relies on the built-in `openAI` endpoint driven by OPENAI_API_KEY
+# in .env. Adding `endpoints:` without listing openAI would silently
+# disable chat.
+#
+# M2 gateway swap (CWORK-1114) happens here via `endpoints.custom`, plus
+# RAG_OPENAI_BASEURL in .env for the embedding path. Neither needs a code
+# change — both are config only.
+
+version: 1.3.13
+cache: true
+
+# File upload limits for the demo corpus (CWORK-1109 — synthetic
+# insurance-denial docs, ~20 files). Defaults are conservative; these are
+# sized for the demo, not for production tenancy.
+fileConfig:
+  endpoints:
+    default:
+      fileLimit: 20
+      fileSizeLimit: 20 # MB
+      totalSizeLimit: 100 # MB
+    agents:
+      fileLimit: 20
+      fileSizeLimit: 20 # MB
+      totalSizeLimit: 100 # MB
+  serverFileSizeLimit: 100 # MB
