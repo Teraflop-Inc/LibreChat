@@ -41,8 +41,25 @@ verify:
 query-set:
 	@uv run --quiet --with pyyaml $(ROOT)/deploy/uuh/demo/validate_query_set.py
 
-## test — query-set contract + proof the validator actually has teeth
-test: query-set
+## corpus — corpus consistency vs the query-set contract (no embedding needed)
+corpus:
+	@uv run --quiet --with pyyaml $(ROOT)/deploy/uuh/demo/check_corpus.py
+
+## corpus-load — embed the corpus into pgvector via the RAG API sidecar
+corpus-load:
+	@uv run --quiet --with pyyaml,requests $(ROOT)/deploy/uuh/demo/rag_harness.py load
+
+## retrieval — the CWORK-1109 done-when. Agentic is what the demo runs on;
+## single-shot is the honest baseline and does NOT pass Q1 (see
+## demo/chunk_sweep_results.md — it is a vocabulary gap, not a defect).
+retrieval:
+	@uv run --quiet --with pyyaml,requests $(ROOT)/deploy/uuh/demo/rag_harness.py test-agentic 8
+
+retrieval-baseline:
+	@uv run --quiet --with pyyaml,requests $(ROOT)/deploy/uuh/demo/rag_harness.py test 8
+
+## test — everything that does not require a running stack
+test: query-set corpus
 	@bash $(ROOT)/deploy/uuh/demo/mutation_test.sh
 
 ## upstream-drift — our changes must stay confined to deploy/uuh

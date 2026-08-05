@@ -63,6 +63,21 @@ questions:
       - CN-04417   # the clinical record it must cite
       - PP-MWHP-IMAGING  # the criteria the argument is built on
 
+    # MEASURED FINDING (CWORK-1109): single-shot retrieval CANNOT gather these
+    # three. The question's vocabulary is insurance-domain ("insurer",
+    # "medically necessary", "denied line item"); CN-04417's is clinical
+    # ("radiculopathy", "dorsiflexion", "foot drop"). One embedding does not
+    # bridge that. Verified across four chunk configurations (29 to 162
+    # chunks) — chunking made no difference, so this is structural.
+    #
+    # Each document IS individually retrievable with vocabulary matched to it.
+    # These are the sub-queries an agent issues to gather the set, and they are
+    # what the agents + file_search path does natively.
+    retrieval_probes:
+      - "denied line item claim UUH-2026-04417 MRI lumbar spine CPT 72148"
+      - "lumbar radiculopathy conservative therapy foot drop dorsiflexion weakness"
+      - "advanced imaging lumbar spine medical necessity coverage criteria"
+
   # ─────────────────────────────────────────────────────────────────────
   - id: Q2-denial-pattern
     hero: false
@@ -134,6 +149,14 @@ questions:
   - id: Q4-guardrail-absent-fact
     hero: false
     expects_refusal: true
+    # Exempt from retrieval scoring, deliberately. This question's success is
+    # the model REFUSING — a generation-layer property. There is no HbA1c in
+    # the corpus, so retrieval "failing" to surface one is correct behaviour,
+    # not a defect; scoring it on whether CN-04417 comes back is a category
+    # error. source_documents below means "the document it should consult and
+    # find nothing in", not a retrieval target. Verified in actual chat at
+    # CWORK-1110, which is the only layer where refusal is observable.
+    retrieval_exempt: true
     question: >-
       For the patient in claim UUH-2026-04417, what was their most recent
       HbA1c result?
@@ -174,6 +197,30 @@ questions:
 # silently invalidates that answer.
 # ══════════════════════════════════════════════════════════════════════
 documents:
+  # ── Hero patient journey (CWORK-1109) ────────────────────────────────
+  # CWORK-1109 asks for a full clinical-to-billing journey per patient:
+  # transcript -> record of care -> bill -> denial. A complete journey for
+  # every patient would cost 4xN documents and crowd out the payer policies
+  # Q3 depends on, so the journey is generated in full only for the hero —
+  # the one the demo actually walks through. CN-04417 and DN-04417 below are
+  # this journey's third and fourth artifacts.
+  #
+  # These two are corpus members but are NOT in Q1's source_documents: the
+  # appeal's argument rests on the denial, the clinical note, and the payer
+  # criteria. The transcript corroborates; the bill establishes charges.
+  - id: TR-04417
+    type: encounter_transcript
+    summary: >-
+      Hero journey, artifact 1. Dictated dialogue of the 2026-03-02 visit.
+      Patient states eight weeks of PT and daily NSAIDs without benefit;
+      clinician elicits and confirms new left foot drop on examination.
+  - id: BILL-04417
+    type: bill
+    summary: >-
+      Hero journey, artifact 3. Charges submitted to Mountain West for the
+      2026-03-02 encounter — office visit, MRI lumbar (CPT 72148), and EMG.
+      Line 002 is the item subsequently denied.
+
   # ── Denial notices (12) ──────────────────────────────────────────────
   - id: DN-04417
     type: denial_notice
