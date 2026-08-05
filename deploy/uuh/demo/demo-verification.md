@@ -156,7 +156,12 @@ error:   Size 32545191 is larger than MaxDocumentSize 16777216 (SQLSTATE M003A)
 
 Missing-document note now obsolete: `TR-04417` and `PP-WSHA-PRIORAUTH` were
 initially un-attachable and are now attached, so the corpus is complete at 22.
-The verification results above were obtained at 20 documents and remain valid;
+
+**Q1 was re-run against the full 22-document corpus after the fix and passes
+identically** — claim UUH-2026-04417, CPT 72148, CO-50, eight-week course, foot
+drop, no CO-197 leak, near-miss `DN-04421` still not cited — and it now also
+draws on the newly-attached encounter transcript. The Q2/Q3/Q4 results below
+were obtained at 20 documents;
 Q3's conflation test in particular passed *without* its planned distractor.
 
 ## Other findings
