@@ -15,7 +15,7 @@ prove retrieval works but not that LibreChat does.
 | Id | `agent_lNe6s9TDnVIrjoB5bNSkt` |
 | Model | `gpt-4o` |
 | Tools | `["file_search"]` |
-| Documents | 20 attached (see the FerretDB cap below) |
+| Documents | **22 attached — all of them.** Verification below was run at 20; the last two were blocked by the FerretDB bloat bug documented further down, now resolved |
 | Resend Files | on — retrieval fires every message, which is what we want when the corpus *is* the agent's knowledge |
 
 `gpt-4o` was chosen over the `gpt-3.5-turbo` default deliberately: the hero query
@@ -69,15 +69,74 @@ before matching — a general fix, not a special case for this answer.
 ### Q3's conflation test passed by a better route than planned
 
 `PP-WSHA-PRIORAUTH` (the rival payer's 180-day window) could not be attached —
-see the cap below — so the planned distractor was absent. But File Search still
+see the FerretDB bloat finding below — so the planned distractor was absent. But File Search still
 retrieved Wasatch **denial notices**, which carry "180 days from this notice per
 Section 7.3", and the model still answered **90 days** for Mountain West. The
 rival figure was in its context and it did not conflate. Stronger evidence than
 the planned test, obtained by accident.
 
-## ⚠️ BLOCKER FOR CWORK-1112: FerretDB caps an agent at 20 documents
+## ⚠️ BLOCKER FOR CWORK-1112: FerretDB accumulates per-document bloat until the document bricks
 
-Attaching the 21st document fails, deterministically, with HTTP 500:
+> **Correction.** This section originally called it "a 20-document cap" and said
+> the stock-Mongo A/B had not been run. Both were wrong. It is **not a cap** —
+> 20 is just where this particular agent happened to cross a threshold. Root
+> cause is below; all 22 documents are now attached.
+
+**Root cause: documentdb stores a physical BSON row that grows monotonically
+with each update and never reclaims space, while the logical document stays
+small. Once documentdb's post-update size computation crosses 16 MB,
+`findAndModify` on that document fails permanently.**
+
+The evidence chain, each step measured:
+
+| observation | value |
+|---|---|
+| logical document (read back over the wire) | **9,252 bytes** |
+| physical row (`pg_column_size(document)`) | **189,725 bytes** — 20× |
+| size documentdb computes for the update | **32,517,923 bytes** — 3,500× |
+
+Discriminating tests, all against the same FerretDB instance:
+
+- Trimming `versions[]` from 22 entries to 3 shrank the logical document
+  39 KB → 9 KB. The failure was **unchanged** — so it is not document size.
+- `VACUUM FULL` on the underlying table: **no effect** — so it is not MVCC bloat.
+- A **fresh** document of identical shape in the **same** collection: **works**.
+- A **copy** of the failing document in a different collection: **works**.
+- A trivial `findAndModify` on the failing document: **works** — only the
+  update path that grows the row fails.
+- Removing `$setOnInsert` (which mongoose adds automatically): **no effect**.
+
+So it is neither the collection, the update shape, nor the document's logical
+size — it is that specific row's accumulated physical representation.
+
+**Confirmed by the fix.** Rewriting the document with byte-identical content
+(delete + reinsert) collapsed the physical row **189,725 → 3,082 bytes**, and
+both previously-failing uploads immediately returned HTTP 200. All 22 corpus
+documents are now attached.
+
+### Why this matters more than a cap would
+
+A cap is a known limit you design around. This is **silent, unbounded growth on
+any frequently-updated document** — the number 20 was an artifact of how many
+times this agent had been updated, not a limit. The same failure will reach
+conversations, users, sessions, or any hot document in a UUH deployment, and it
+gives no warning until the document is already un-updatable.
+
+- **Workaround:** rewrite the document (delete + reinsert identical content).
+  Cheap, but it needs a maintenance job, and nothing surfaces *which* documents
+  need it before they fail.
+- **Note for CWORK-1112:** the earlier claim that "stock MongoDB is untested" no
+  longer applies — an A/B on the identical document and update passed on both
+  engines, which is exactly why the naive reproduction was misleading. The
+  failure needs an *aged* row, not a particular document or statement, so any
+  comparison must age the row rather than replay one update.
+
+This is precisely the incompatibility CWORK-1107 predicted would "surface on day
+one rather than during the M2 spike."
+
+### Original symptom, for reference
+
+Attaching the 21st document failed, deterministically, with HTTP 500:
 
 ```
 [/files] Error processing file: Size 32545191 is larger than MaxDocumentSize 16777216
@@ -92,32 +151,13 @@ sql:     SELECT p_result::bytea, p_success FROM documentdb_api.find_and_modify($
 error:   Size 32545191 is larger than MaxDocumentSize 16777216 (SQLSTATE M003A)
 ```
 
-**The agent document is 36,849 bytes. FerretDB computes the post-update size as
-32,545,191 — 883× its actual size.** The reported figure is byte-identical on
-every retry regardless of which file is uploaded, so it is a fixed
-mis-computation, not accumulation.
+**The agent document was 36,849 bytes. FerretDB computed the post-update size as
+32,545,191** — the discrepancy explained above.
 
-Mechanism on the LibreChat side: every agent update appends a full snapshot to
-`versions[]` (21 versions = 34.6 KB of the 36.8 KB document). Attaching a file
-is such an update.
-
-Two reproduction attempts against FerretDB **did not** trigger it — a plain
-nested-array `$push` (40 pushes) and a faithful `versions[]`-shaped document
-(40 updates, 52 KB). So it is specific to LibreChat's actual update path, and
-narrowing it further is upstream work.
-
-**Impact on UUH:** a hard 20-document ceiling per agent. Their real corpus will
-be far larger. This is exactly the incompatibility CWORK-1107 predicted would
-"surface on day one rather than during the M2 spike."
-
-**Not yet established: whether stock MongoDB is unaffected.** That A/B is the
-decisive datapoint for CWORK-1112 and has not been run. Do not conclude FerretDB
-is at fault until it has — the reproductions above failed to isolate it, so a
-LibreChat-side interaction is not ruled out.
-
-Missing from the demo as a result: `TR-04417` (hero transcript — corroborating
-only, Q1 does not depend on it) and `PP-WSHA-PRIORAUTH` (Q3's distractor, which
-turned out not to matter — see above).
+Missing-document note now obsolete: `TR-04417` and `PP-WSHA-PRIORAUTH` were
+initially un-attachable and are now attached, so the corpus is complete at 22.
+The verification results above were obtained at 20 documents and remain valid;
+Q3's conflation test in particular passed *without* its planned distractor.
 
 ## Other findings
 
