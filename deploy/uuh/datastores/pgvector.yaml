@@ -1,0 +1,142 @@
+# pgvector PostgreSQL — CWORK-1115 / CWORK-1107
+#
+# The RAG vector store. LibreChat's RAG API sidecar embeds uploaded documents
+# into this database; it is the retrieval layer behind File Search and the whole
+# denial-appeals demo.
+#
+#   oc apply -f deploy/uuh/datastores/pgvector.yaml -n <namespace>
+#
+# ── VERIFIED UNDER THE OPENSHIFT restricted-v2 SHAPE ──────────────────────────
+# Run as an arbitrary high UID in group 0, all capabilities dropped:
+#   database system is ready to accept connections
+#   CREATE EXTENSION vector  ->  vector 0.8.0
+#   SELECT '[1,2,3]'::vector <-> '[4,5,6]'::vector  ->  5.196152422706632
+#
+# One cosmetic warning appears and can be ignored:
+#   chmod: changing permissions of '/var/run/postgresql': Operation not permitted
+# The socket directory is already mode 1777 with setgid, so both socket and TCP
+# connections work. Verified by connecting over the socket after the warning.
+#
+# ── ⚠️ THIS MAY NOT NEED TO EXIST ─────────────────────────────────────────────
+# The documentdb image used by ferretdb.yaml ALREADY SHIPS pgvector (0.8.1 —
+# newer than this image's 0.8.0), because documentdb requires it. A vector
+# distance query was confirmed working inside that database.
+#
+# So one PostgreSQL could serve both FerretDB and RAG, cutting a stateful
+# component from the OpenShift footprint. Deliberately NOT done here, for three
+# reasons worth stating rather than assuming:
+#   - blast radius: a runaway embedding job should not be able to degrade the
+#     application database
+#   - lifecycle: the vector store is rebuildable from source documents; the
+#     application database is not, so their backup and restore requirements
+#     genuinely differ
+#   - upstream shape: LibreChat's own compose keeps them separate, so this is
+#     the configuration upstream tests
+#
+# If UUH's storage quota or DBA capacity makes two PostgreSQL instances a
+# problem, collapsing to one is viable and now known to work. Raise it with
+# Jason rather than discovering it under pressure.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgvector-credentials
+  labels:
+    app.kubernetes.io/name: pgvector
+    app.kubernetes.io/part-of: uuh-librechat
+type: Opaque
+stringData:
+  # ⚠️ PLACEHOLDER — replace before any real deployment. These must match
+  # POSTGRES_USER / POSTGRES_PASSWORD / DB_NAME in LibreChat's RAG API config.
+  POSTGRES_USER: myuser
+  POSTGRES_PASSWORD: CHANGEME-generate-a-real-secret
+  POSTGRES_DB: mydatabase
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vectordb
+  labels:
+    app.kubernetes.io/name: pgvector
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: pgvector
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vectordb
+  labels:
+    app.kubernetes.io/name: pgvector
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  serviceName: vectordb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pgvector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pgvector
+    spec:
+      # No pod-level securityContext — OpenShift injects runAsUser and fsGroup
+      # from the namespace range. fsGroup is what makes the PVC group-writable
+      # by the assigned UID; setting it ourselves is rejected at admission.
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.0-pg15-trixie
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: pgvector-credentials, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: pgvector-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: pgvector-credentials, key: POSTGRES_PASSWORD }
+            # Subdirectory of the mount, not the mount itself — see ferretdb.yaml.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+        # storageClassName: <set to a UUH storage class>

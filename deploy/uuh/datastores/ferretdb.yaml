@@ -1,0 +1,212 @@
+# FerretDB + documentdb PostgreSQL — CWORK-1115 / CWORK-1112
+#
+# LibreChat's Mongo-compatible datastore, as UUH will run it: no MongoDB Inc.
+# vendor, no SSPL-licensed software, no Mongo binary. FerretDB speaks the Mongo
+# wire protocol and persists into PostgreSQL via the documentdb extension.
+#
+# Deliberately plain Kubernetes manifests, not a chart. The umbrella-vs-separate-
+# releases decision is still open (it depends on whether UUH runs ArgoCD/Flux or
+# plain Helm), and these are needed under every option. They drop into a chart's
+# templates/ unchanged if the umbrella route is chosen.
+#
+#   oc apply -f deploy/uuh/datastores/ferretdb.yaml -n <namespace>
+#
+# ── VERIFIED UNDER THE OPENSHIFT restricted-v2 SHAPE ──────────────────────────
+# Both images were run as an arbitrary high UID in group 0 with all capabilities
+# dropped, and the full chain was exercised end to end — a Mongo-protocol insert
+# and count round-tripped through FerretDB into documentdb:
+#
+#   inserted, docs=1
+#
+# Two things that had to be right to get there are encoded below. Neither is
+# obvious and both cause hard failures.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ferretdb-credentials
+  labels:
+    app.kubernetes.io/name: ferretdb
+    app.kubernetes.io/part-of: uuh-librechat
+type: Opaque
+stringData:
+  # ⚠️ PLACEHOLDER — replace before any real deployment, ideally with a
+  # SealedSecret or External Secrets reference rather than a literal.
+  # The Postgres role doubles as the Mongo credential: FerretDB 2.x REQUIRES
+  # auth, and LibreChat authenticates as this same user over the wire.
+  POSTGRES_USER: ferretdb
+  POSTGRES_PASSWORD: CHANGEME-generate-a-real-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferretdb-postgres
+  labels:
+    app.kubernetes.io/name: ferretdb-postgres
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  # Headless: the StatefulSet gets stable DNS, and nothing outside the
+  # namespace should reach Postgres directly.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: ferretdb-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ferretdb-postgres
+  labels:
+    app.kubernetes.io/name: ferretdb-postgres
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  serviceName: ferretdb-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferretdb-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferretdb-postgres
+    spec:
+      # NO securityContext block. This is deliberate: OpenShift's restricted-v2
+      # admission injects runAsUser and fsGroup from the namespace's allocated
+      # range. Specifying either would be REJECTED at admission — the pod never
+      # starts and produces no logs to debug. fsGroup in particular is what makes
+      # the PVC group-writable by the assigned UID, so letting OpenShift set it
+      # is not just permitted, it is what makes Postgres able to write at all.
+      containers:
+        - name: postgres
+          image: ghcr.io/ferretdb/postgres-documentdb:17-0.107.0-ferretdb-2.7.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: ferretdb-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ferretdb-credentials, key: POSTGRES_PASSWORD }
+            # ⚠️ MUST be a SUBDIRECTORY of the mount point, not the mount point
+            # itself. A mounted volume root often contains lost+found, and
+            # initdb refuses to initialise a non-empty directory — the container
+            # then crashloops with "directory exists but is not empty".
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d postgres"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+        # storageClassName: <set to a UUH storage class>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferretdb
+  labels:
+    app.kubernetes.io/name: ferretdb
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  selector:
+    app.kubernetes.io/name: ferretdb
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: mongo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferretdb
+  labels:
+    app.kubernetes.io/name: ferretdb
+    app.kubernetes.io/part-of: uuh-librechat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferretdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferretdb
+    spec:
+      containers:
+        - name: ferretdb
+          image: ghcr.io/ferretdb/ferretdb:2.7.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: mongo
+              containerPort: 27017
+          env:
+            - name: FERRETDB_POSTGRESQL_URL
+              value: postgres://$(PGUSER):$(PGPASSWORD)@ferretdb-postgres:5432/postgres
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: { name: ferretdb-credentials, key: POSTGRES_USER }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: ferretdb-credentials, key: POSTGRES_PASSWORD }
+          volumeMounts:
+            # ⚠️ REQUIRED. The image declares USER ferretdb, so /state is owned
+            # by that user and is unwritable by OpenShift's arbitrary UID.
+            # Measured without it:
+            #   Failed to set up state provider: failed to persist state:
+            #   open /state/state.json: permission denied     (exit 1)
+            # emptyDir is correct — this is process state, not data. The data
+            # lives in Postgres.
+            - name: state
+              mountPath: /state
+          readinessProbe:
+            tcpSocket: { port: mongo }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: state
+          emptyDir: {}
