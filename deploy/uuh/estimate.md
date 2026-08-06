@@ -7,7 +7,7 @@ bills UUH ~$250/hr.
 
 > ## Headline: the 100-hour block does not reach production.
 >
-> Full scope estimates at **~158 hours** (band 135–190h). **29.5h is already
+> Full scope estimates at **~158 hours** (band 135–190h). **30h is already
 > consumed**, itemised below. The block covers M1, M2 validation, the research tickets,
 > and the start of Helm work — it stops well short of a running OpenShift deployment.
 >
@@ -138,8 +138,8 @@ one well-intentioned edit to `client/src/style.css`.
 | 4 — Production deployment | 66 |
 | 5 — Integrations | 26 |
 | 6 — Handover | 12 |
-| Engagement admin — recap email (CWORK-1123), this estimate (CWORK-1124) | 1.5 |
-| **Total** | **157.5** |
+| Engagement admin — recap email (CWORK-1123), this estimate (CWORK-1124) | 2 |
+| **Total** | **158** |
 
 Consumed to date, itemised so the figure is auditable rather than asserted:
 
@@ -148,16 +148,20 @@ Consumed to date, itemised so the figure is auditable rather than asserted:
 | M1 demo, complete (CWORK-1107 → 1111) | 15 | 1 |
 | FerretDB spike, complete (CWORK-1112) | 10 | 2 |
 | Observability, complete (CWORK-1119) | 3 | 3 |
-| Recap email + this estimate | 1.5 | admin |
-| **Consumed** | **29.5** | |
+| Recap email + this estimate | 2 | admin |
+| **Consumed** | **30** | |
 
 | | Hours |
 |---|---|
-| Total scope | 157.5 |
-| Consumed to date | 29.5 |
+| Total scope | 158 |
+| Consumed to date | 30 |
 | Remaining | **128** |
 | **Work Order 15 block** | **100** |
-| **Shortfall against full scope** | **~57** |
+| **Shortfall against full scope** | **~58** |
+
+**Whole hours only, deliberately.** The band below is ±25h. Carrying half-hours into a
+total would imply a precision this does not have — the underlying ticket estimates use
+half-hour increments, but they stop being meaningful once summed.
 
 **Band: 135–190h.** Low end assumes the DBAs approve every extension, their gateway
 serves a capable model, and OpenShift accepts the workloads without SCC fights. High end
@@ -167,7 +171,7 @@ assumes one of those goes wrong — most likely the extension privileges or `res
 
 Roughly: everything through M2 validation and the research tickets, plus the Helm chart
 authored and the first OpenShift deployment attempted — approximately **hours 1–100 of
-the 157.5**. It stops mid-Phase-4.
+the 158**. It stops mid-Phase-4.
 
 That is a defensible place to pause and re-scope with a real measurement of the OpenShift
 work in hand, rather than the estimate above.
