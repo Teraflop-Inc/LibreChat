@@ -72,10 +72,15 @@ already. Held at **12h** rather than reduced, because closing them properly mean
 hands-on validation, not a written summary — and two have already returned answers that
 change the architecture:
 
-- **R3 observability (CWORK-1119):** Purview has **no read API**. Microsoft's own docs:
-  *"There are no APIs available to extract data or analytics from Microsoft Purview."*
-  Dashboards, alerting, and regression tests cannot be built on it. A real observability
-  platform is now required work, not an evaluation.
+- **R3 observability (CWORK-1119): ✅ now complete, 3h.** Purview has **no read API**
+  (Microsoft's own docs: *"There are no APIs available to extract data or analytics from
+  Microsoft Purview."*), so a real observability platform is required work, not an
+  evaluation. Hands-on testing then found the integration point is the **OTel collector
+  LibreChat already ships** — no LiteLLM or gateway instrumentation needed — and that
+  Phoenix cannot read LibreChat's spans without an attribute transform, which is now
+  written and verified. Net effect on this estimate: **Phase 5's observability line holds
+  at 10h**, because the transform work is done but the platform still has to be deployed,
+  secured, and wired to real traffic.
 - **R6 skillification (CWORK-1122):** no credible self-hosted Cowork alternative exists;
   twelve platforms surveyed, every one fails a hard constraint. Confirms the build-on-
   Agents direction.
@@ -88,7 +93,7 @@ of it has been measured, because none of it has been attempted.
 | Work | Hours | Risk |
 |---|---|---|
 | Helm chart — author or adapt, parameterise for UUH | 12 | Medium. No official chart; community charts are of unknown maintenance quality. |
-| OpenShift `restricted-v2` SCC compliance | 10 | **High.** Non-root, no privileged containers, arbitrary UID. LibreChat and its sidecars are not written with this in mind; FerretDB/documentdb least of all. |
+| OpenShift `restricted-v2` SCC compliance | 10 | **High — now with evidence.** Non-root, no privileged containers, arbitrary UID. CWORK-1119 tested one sidecar (Phoenix) under the `restricted-v2` container shape and it **crashlooped at import time**: the image declares `User=0`, OpenShift overrides it, `HOME` becomes `/`, and its working directory is unwritable. One env var fixed it — but that is one container, found in minutes, and the stack has many. FerretDB/documentdb least likely to cooperate. |
 | Index creation for `autoIndex: false` | 6 | Medium. Production disables automatic index creation; every index LibreChat relies on must be created explicitly. Missing one degrades silently under load rather than failing loudly. |
 | Postgres + extensions in their environment | 8 | **High, and gating.** Blocked on CWORK-1113. If `documentdb` is refused, the FerretDB architecture is void and this re-plans entirely. |
 | Deploy and iterate in their cluster | 16 | **High.** First contact with a real environment. Estimated generously and still likely optimistic. |
@@ -133,14 +138,26 @@ one well-intentioned edit to `client/src/style.css`.
 | 4 — Production deployment | 66 |
 | 5 — Integrations | 26 |
 | 6 — Handover | 12 |
-| **Total** | **156** |
+| Engagement admin — recap email (CWORK-1123), this estimate (CWORK-1124) | 1.5 |
+| **Total** | **157.5** |
+
+Consumed to date, itemised so the figure is auditable rather than asserted:
+
+| Work | Hours | Phase |
+|---|---|---|
+| M1 demo, complete (CWORK-1107 → 1111) | 15 | 1 |
+| FerretDB spike, complete (CWORK-1112) | 10 | 2 |
+| Observability, complete (CWORK-1119) | 3 | 3 |
+| Recap email + this estimate | 1.5 | admin |
+| **Consumed** | **29.5** | |
 
 | | Hours |
 |---|---|
-| Consumed to date | ~30 |
-| Remaining | ~126 |
+| Total scope | 157.5 |
+| Consumed to date | 29.5 |
+| Remaining | **128** |
 | **Work Order 15 block** | **100** |
-| **Shortfall against full scope** | **~56** |
+| **Shortfall against full scope** | **~57** |
 
 **Band: 135–190h.** Low end assumes the DBAs approve every extension, their gateway
 serves a capable model, and OpenShift accepts the workloads without SCC fights. High end

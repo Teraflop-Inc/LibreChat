@@ -1,0 +1,100 @@
+# UUH observability collector — CWORK-1119
+#
+# One OTel collector, two backends. LibreChat posts LLM traces here (point
+# LANGFUSE_BASE_URL at this collector); the collector forwards them unchanged to
+# Langfuse and, via an attribute transform, in Phoenix-readable form to Phoenix.
+#
+# ── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────
+# LibreChat emits Langfuse-flavoured spans (langfuse.observation.*). Phoenix
+# reads OpenInference (openinference.span.kind, llm.token_count.*). Measured:
+#
+#   span sent                     Phoenix spanKind   tokens (total/prompt/compl)
+#   Langfuse-flavoured, raw       unknown            0 / null / null
+#   OpenInference control         llm                59 / 42 / 17
+#   Langfuse-flavoured, THIS FILE llm                59 / 42 / 17
+#
+# Without the transform Phoenix stores the spans but cannot interpret them: no
+# token accounting, no cost, no prompt/completion panes, no LLM-as-judge evals.
+# With it, Phoenix is byte-identical to a natively-instrumented span.
+#
+# ── WHY NOT THE SHIPPED CHART ─────────────────────────────────────────────────
+# LibreChat's Helm chart already ships an otel-collector-contrib sidecar
+# (values: langfuseFanout.otelCollector), but its config is hardcoded in
+# templates/langfuse-fanout-configmap.yaml with no values hook for extra
+# processors or exporters. Editing it would create fork drift in helm/.
+# This collector is UUH-owned and stands alone, so the chart stays pristine.
+#
+# The receiver path below is not arbitrary: the Langfuse SDK posts to
+# {LANGFUSE_BASE_URL}/api/public/otel/v1/traces. Verified in @langfuse/otel.
+#
+# Test it:  bash deploy/uuh/observability/verify.sh
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: ${env:UUH_OTEL_RECEIVER_ENDPOINT}
+        include_metadata: true
+        # Must match the Langfuse SDK's ingest path — see note above.
+        traces_url_path: /api/public/otel/v1/traces
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: ${env:UUH_OTEL_MEMORY_LIMIT_MIB}
+    spike_limit_mib: ${env:UUH_OTEL_MEMORY_SPIKE_LIMIT_MIB}
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  # Langfuse -> OpenInference. Applied only on the Phoenix pipeline, so the
+  # Langfuse pipeline receives its own native attributes untouched.
+  #
+  # error_mode: ignore is deliberate — a span missing usage_details (a tool
+  # call, a retrieval step) must still flow rather than drop the batch.
+  transform/langfuse_to_openinference:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["openinference.span.kind"], "LLM") where attributes["langfuse.observation.type"] == "generation"
+          - set(attributes["openinference.span.kind"], "CHAIN") where attributes["langfuse.observation.type"] == "span"
+          - set(attributes["input.value"], attributes["langfuse.observation.input"]) where attributes["langfuse.observation.input"] != nil
+          - set(attributes["output.value"], attributes["langfuse.observation.output"]) where attributes["langfuse.observation.output"] != nil
+          - set(attributes["llm.model_name"], attributes["langfuse.observation.model.name"]) where attributes["langfuse.observation.model.name"] != nil
+          - set(attributes["llm.invocation_parameters"], attributes["langfuse.observation.model.parameters"]) where attributes["langfuse.observation.model.parameters"] != nil
+          - set(attributes["llm.token_count.prompt"], Int(ParseJSON(attributes["langfuse.observation.usage_details"])["input"])) where attributes["langfuse.observation.usage_details"] != nil
+          - set(attributes["llm.token_count.completion"], Int(ParseJSON(attributes["langfuse.observation.usage_details"])["output"])) where attributes["langfuse.observation.usage_details"] != nil
+          - set(attributes["llm.token_count.total"], Int(ParseJSON(attributes["langfuse.observation.usage_details"])["total"])) where attributes["langfuse.observation.usage_details"] != nil
+          - set(attributes["session.id"], attributes["langfuse.trace.session_id"]) where attributes["langfuse.trace.session_id"] != nil
+          - set(attributes["user.id"], attributes["langfuse.trace.user_id"]) where attributes["langfuse.trace.user_id"] != nil
+
+exporters:
+  # Self-hosted Langfuse. MUST be an in-cluster address for UUH — the SDK
+  # default is https://cloud.langfuse.com, which would send prompts and
+  # completions (PHI) to a third party. See README.
+  otlphttp/langfuse:
+    endpoint: '${env:UUH_LANGFUSE_BASE_URL}/api/public/otel'
+    headers:
+      Authorization: '${env:UUH_LANGFUSE_AUTH_HEADER}'
+      x-langfuse-ingestion-version: '4'
+
+  otlphttp/phoenix:
+    endpoint: '${env:UUH_PHOENIX_ENDPOINT}'
+    tls:
+      insecure: ${env:UUH_PHOENIX_TLS_INSECURE}
+
+service:
+  pipelines:
+    # Two independent pipelines off one receiver. An outage in either backend
+    # does not affect the other.
+    traces/langfuse:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/langfuse]
+
+    traces/phoenix:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/langfuse_to_openinference, batch]
+      exporters: [otlphttp/phoenix]
