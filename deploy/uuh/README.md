@@ -24,6 +24,50 @@ docker compose -f docker-compose.yml -f deploy/uuh/docker-compose.uuh.yml up -d
 
 LibreChat: <http://localhost:3080> · Admin panel: <http://localhost:3000>
 
+## Local credentials
+
+⚠️ **Local demo only.** Everything here is a throwaway credential for a stack
+holding entirely synthetic data. Nothing in this table exists in any deployed
+environment, and none of it may be reused in one.
+
+| What | User | Password |
+|---|---|---|
+| **LibreChat UI** (<http://localhost:3080>) | `demo@uuh.local` | `password123` |
+| **Admin panel** (<http://localhost:3000>) | same — see below | same |
+| FerretDB / documentdb Postgres | `ferretdb` | `ferretdb` |
+| pgvector (RAG store) | `myuser` | `mypassword` |
+
+**The admin panel has no separate account.** It proxies authentication to the
+LibreChat API (`API_SERVER_URL=http://api:3080`) and gates on the `ADMIN` role,
+so you sign in with the same credentials. `demo@uuh.local` is the only user in
+the database and it holds `ADMIN`, so it is both the ordinary user and the
+administrator.
+
+To reach the demo itself: sign in, then select the **UUH Denial Appeals** agent
+(`claude-sonnet-5`, 22 corpus documents attached, File Search enabled).
+
+The datastore rows above are not a disclosure — they are hardcoded in
+`docker-compose.uuh.yml` and upstream's `docker-compose.yml`, which is exactly
+why they are safe to write down and exactly why they must never survive into
+production. `deploy/uuh/datastores/*.yaml` carries `CHANGEME` placeholders for
+that reason.
+
+**Real secrets are NOT here.** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`JWT_SECRET`, `CREDS_KEY` and the rest live in `.env`, which is gitignored. The
+current OpenAI key is a **Solutions-Fabric service account**, deliberately not a
+personal key.
+
+Resetting the UI password (it is a bcrypt hash, so it cannot be read back):
+
+```bash
+docker exec LibreChat node -e "
+const bcrypt=require('bcryptjs'); const {MongoClient}=require('mongodb');
+(async()=>{const h=await bcrypt.hash('password123',10);
+const c=await MongoClient.connect(process.env.MONGO_URI);
+await c.db('LibreChat').collection('users').updateOne({email:'demo@uuh.local'},{\$set:{password:h}});
+await c.close(); console.log('reset');})()"
+```
+
 ## Pulling from upstream
 
 ```bash
