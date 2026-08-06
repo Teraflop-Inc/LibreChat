@@ -1,7 +1,30 @@
 # Demo verification — CWORK-1110
 
+> ## ⚠️ CORRECTION — 2026-08-06
+>
+> **The Q1 and Q2 results below were each a SINGLE run, and neither reproduces
+> on `gpt-4o`.** Re-tested the next day with 3+ runs per question:
+>
+> | | recorded below (1 run) | actual, on `gpt-4o` |
+> |---|---|---|
+> | **Q1 hero** | PASS | **5/6** — one run picked the near-miss `DN-04421`, then addressed a *Wasatch* claim to *Mountain West* citing Mountain West's *imaging* policy for a facet injection |
+> | **Q2 count** | PASS, "5 claims" | **4, 5, or 6 across runs.** One run conflated `DN-04425` (EEG) with `DN-04428`'s content |
+> | **Q3** | PASS | ✅ 3/3, holds |
+> | **Q4 guardrail** | PASS | ✅ 7 runs, 0 fabrications, holds |
+>
+> **Cause: the model.** On `claude-sonnet-5` and `gpt-5` both failures disappear —
+> Q1 3/3 and 2/2 correct, Q2 exact every time. Sonnet enumerates all 12 denial
+> notices and builds a full breakdown across all five denial codes before
+> counting; verified against the corpus, every code/count/document-id correct.
+> **The agent now runs `claude-sonnet-5`. `gpt-4o` is not adequate for this demo.**
+>
+> **The methodological error is the point:** one sample per question is not a
+> result. Chunking made no difference across a 5.6× sweep; the model changed
+> correctness outright. Full detail: `~/Downloads/uuh-demo-verification/RESULTS.md`.
+
 All four CWORK-1108 questions answered correctly through the LibreChat UI, by a
-LibreChat **Agent** using **File Search** (true RAG), on `gpt-4o`.
+LibreChat **Agent** using **File Search** (true RAG). Originally verified on
+`gpt-4o` — see the correction above; the agent now runs `claude-sonnet-5`.
 
 Built inside LibreChat rather than as a standalone script, per the ticket: the
 pitch is "your chat platform doing your work," and a standalone RAG script would

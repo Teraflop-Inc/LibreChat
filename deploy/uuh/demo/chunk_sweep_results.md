@@ -1,5 +1,28 @@
 # Chunking sweep — CWORK-1109
 
+> ## Note added 2026-08-06 — findings stand, with one scope clarification
+>
+> Everything below was **re-checked** after a day of repeat-run testing and
+> **holds**. Chunking still makes no difference; the vocabulary gap is real; the
+> near-miss distractors work (one caught a wrong-claim failure the next day).
+>
+> **Scope clarification.** These measurements come from `rag_harness.py`, which
+> queries the embedding store **directly — no model involved.** So "single-shot
+> retrieval cannot gather the hero's three documents" is a statement about
+> *embedding retrieval*, and remains true.
+>
+> It is **not** a statement about what a capable model can do on the agents path.
+> This document already recorded agentic retrieval passing 3/3, and that is what
+> the product does: on `claude-sonnet-5` the agent gathers all three documents
+> and cites `CN-04417` by name.
+>
+> ⚠️ **A claim elsewhere was wrong and is corrected here for the record.** On
+> 2026-08-06 I wrote that Q2's counting failure was "a structural limit of RAG for
+> aggregation" and attributed that reasoning to *this* document. **This document
+> never made that claim**, and the claim itself is false — Q2's failure was a
+> `gpt-4o` limitation. `claude-sonnet-5` and `gpt-5` both count exactly right over
+> the same corpus, retrieval, and `k`.
+
 CWORK-1109 left chunking deliberately unprescribed: *"Pick the strategy
 empirically from measured retrieval performance — bitter-lesson framing, don't
 hand-design what you can determine from results."*

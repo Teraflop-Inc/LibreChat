@@ -18,6 +18,13 @@
 #   uv run --with pyyaml deploy/uuh/demo/validate_query_set.py
 
 meta:
+  # MODEL MATTERS MORE THAN ANY OTHER VARIABLE (measured 2026-08-06).
+  # gpt-4o failed Q1 ~1-in-6 (picked the near-miss distractor) and gave Q2 counts
+  # of 4, 5, or 6 against a ground truth of 5. claude-sonnet-5 and gpt-5 both fix
+  # both, over the same corpus, retrieval, and k. Chunking, by contrast, made no
+  # difference across a 5.6x sweep. Verify the model before blaming the pipeline.
+  verified_on_model: claude-sonnet-5
+  known_inadequate: gpt-4o
   ticket: CWORK-1108
   hands_off_to: CWORK-1109
   verified_by: CWORK-1110
