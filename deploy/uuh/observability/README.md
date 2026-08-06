@@ -186,6 +186,56 @@ LibreChat ──OTLP──▶ collector ──┬──▶ Langfuse   (native at
   Start with whichever UUH's procurement clears first; adding the other later is
   a collector config change, not a migration.
 
+### Vendor research — four things that firm up the comparison
+
+**1. The transform is the vendor-documented approach, not a workaround.**
+Self-hosted Phoenix reads OpenInference only; it does **not** normalise
+`gen_ai.*` or any other convention server-side. Arize's docs carry a page,
+*Translating Semantic Conventions*, specifically for converting OpenLIT,
+OpenLLMetry, and OTel-GenAI traces via span processors — which is exactly what
+`otelcol.yaml` does. The gap is tracked upstream in
+[Arize-ai/phoenix#10622](https://github.com/Arize-ai/phoenix/issues/10622).
+Notably the **commercial** Arize AX *does* normalise `gen_ai.*` on ingest; the
+OSS server does not. So the transform is not avoidable by switching conventions —
+it would be needed even if LibreChat emitted pure OTel GenAI.
+
+**2. Langfuse's four datastores are confirmed mandatory, and the footprint is
+substantial.** All four — Postgres, ClickHouse, Redis/Valkey, S3/blob — are hard
+requirements in v3+; a Postgres-only mode was explored upstream and **explicitly
+rejected**. Minimum resources, from Langfuse's own docs:
+
+| Component | CPU | RAM |
+|---|---|---|
+| Langfuse Web | 2 | 4 GiB |
+| Langfuse Worker | 2 | 4 GiB |
+| Postgres | 2 | 4 GiB |
+| Redis/Valkey | 1 | 1.5 GiB |
+| ClickHouse | 2 | 8 GiB |
+| **Total** | **9** | **21.5 GiB** |
+
+That is **five stateful components and ~9 CPU / 21.5 GiB** for the observability
+plane alone, versus Phoenix's single Postgres. In an OpenShift namespace with a
+quota this is a real procurement conversation, and it is the strongest remaining
+argument for Phoenix. (Air-gapped deployment is supported for both.)
+
+**3. Langfuse telemetry is ON by default and must be disabled in two places.**
+Previously recorded as "no default, unverified." Now confirmed: self-hosted OSS
+Langfuse phones home unless you set `TELEMETRY_ENABLED=false` — and the docs
+specify setting it on **both** the `langfuse-web` *and* `langfuse-worker`
+containers. It reports aggregated usage metrics via PostHog Cloud, not traces or
+prompts. ⚠️ **Enterprise self-hosted telemetry is used for license compliance and
+cannot be disabled** — relevant if UUH ends up on a paid tier.
+
+**4. Phoenix's ELv2 licence is likely fine here, but is not OSI-approved.**
+Self-hosting for internal use is explicitly permitted with no feature gates; the
+restriction is on offering it to third parties as a hosted service, which UUH
+would not be doing. The client/eval subpackages (`phoenix-evals`,
+`phoenix-client`, `phoenix-otel`) are Apache-2.0; only the platform server is
+ELv2. **The procurement risk is categorical, not practical** — if UUH's legal
+team treats "not OSI-approved" as disqualifying, Phoenix fails review regardless
+of the actual terms. Langfuse's MIT core has no such exposure. Worth asking
+early rather than after building on it.
+
 ### Deployment gates
 
 | Gate | Setting |
@@ -194,14 +244,23 @@ LibreChat ──OTLP──▶ collector ──┬──▶ Langfuse   (native at
 | 🔴 Phoenix arbitrary UID | `PHOENIX_WORKING_DIR=/var/phoenix` + writable volume |
 | 🟡 Phoenix phone-home | `PHOENIX_TELEMETRY_ENABLED=false`, `PHOENIX_ALLOW_EXTERNAL_RESOURCES=false` |
 | 🟡 Phoenix sandbox providers | `PHOENIX_ALLOWED_SANDBOX_PROVIDERS=NONE`, `PHOENIX_ALLOWED_PROVIDERS=NONE` |
-| 🟡 Langfuse phone-home | `TELEMETRY_ENABLED=false` — **set it explicitly**; the schema in `web/src/env.mjs` declares it optional with **no default**, so unset means `undefined` and the consuming code decides. Not verified which way. |
+| 🔴 Langfuse phone-home | `TELEMETRY_ENABLED=false` **on both `langfuse-web` and `langfuse-worker`** — confirmed ON by default in self-hosted OSS. Reports aggregated usage via PostHog Cloud (not traces/prompts). Enterprise telemetry is licence-compliance and **cannot** be disabled. |
 | 🟡 Langfuse UTC | ClickHouse and Postgres must both run UTC or queries silently return wrong results |
 | 🟡 Phoenix licence | ELv2 + patents US 11,315,043 / 11,615,345 — legal review |
 
 ## Still open
 
-- **Purview metering cost** at LibreChat's expected volume — needs UUH's
-  Microsoft account team. Blocked on the CWORK-1123 email.
+- **Purview metering cost** at LibreChat's expected volume — still needs UUH's
+  Microsoft account team, but the model is now understood well enough to ask a
+  sharp question. Billing unit is a **text record = up to 1,000 characters**;
+  audit for non-Microsoft AI apps is **$15 per 1M records ingested** with 180-day
+  retention. Critically, **the Copilot exemption does not apply to LibreChat** —
+  first-party Microsoft AI is not charged, but LibreChat is a third-party AI app
+  and therefore meters on every prompt and response. Per-unit rates for
+  Communication Compliance / DSPM-for-AI are not public; that is the specific ask
+  for their account team. Also note Insider Risk Management moved "Other AI apps"
+  indicators to pay-as-you-go on **1 April 2026**, and PAYG requires an Azure
+  subscription linked to Purview.
 - **Which platform procurement clears.** Technical work no longer gates this.
 - **Whether to upstream the mask hook.** Only matters if option 1 above is
   rejected.
@@ -210,17 +269,68 @@ LibreChat ──OTLP──▶ collector ──┬──▶ Langfuse   (native at
   as `unknown` until added — trivial, but it needs real LibreChat traffic to
   enumerate which types actually appear.
 
+## ✅ Validated against REAL LibreChat traffic
+
+The synthetic-span limitation below is now **closed**. A live agent run was put
+through the collector end to end: LibreChat → collector → Phoenix, with
+`LANGFUSE_BASE_URL` pointed at the collector and the real `UUH Denial Appeals`
+agent on `claude-sonnet-5` answering a real corpus question.
+
+**It found a real defect the synthetic test could not.** The first live run:
+
+| span | Phoenix kind | tokens |
+|---|---|---|
+| `llm` | `llm` | **1921** (1160 / 761) ✅ |
+| `agent` | **`unknown`** ❌ | — |
+| `AgentRun` (trace root) | **`unknown`** ❌ | — |
+
+LibreChat emits `langfuse.observation.type = agent`, which the original transform
+did not map — so **the trace root itself landed unclassified.** The synthetic
+span only exercised `generation`, so this was invisible to it.
+
+The map now covers every type live traffic produces, plus `tool`, `retriever`,
+`embedding`, `guardrail`, `evaluator` pre-emptively, and a **CHAIN fallback** so
+an unmapped-but-typed observation degrades to a usable kind instead of
+`unknown`. Re-run against live traffic:
+
+| span | kind | total | prompt | completion | ms |
+|---|---|---|---|---|---|
+| `prompt` | chain | — | — | — | 0 |
+| `llm` | **llm** | 1640 | 1160 | 480 | 6286 |
+| `RunnableSequence` | chain | — | — | — | 6288 |
+| `agent` | **agent** ✅ | — | — | — | 6292 |
+| `tool-dispatch` | chain | — | — | — | 1262 |
+| `llm` | **llm** | **11020** | **10344** | 676 | 7648 |
+| `agent` | **agent** ✅ | — | — | — | 7661 |
+
+**Zero `unknown` spans.** Two things worth noting in that trace:
+
+- **The agent loop is visible** — two `llm` calls with a `tool-dispatch` between
+  them: the model decides to search, then answers from what came back.
+- **RAG is visible in the token counts.** The second call carries **10,344 prompt
+  tokens** against the first call's 1,160. That jump *is* File Search injecting
+  corpus documents into context. This is exactly the per-query cost signal UUH
+  would want a dashboard on, and it is legible in Phoenix with no extra work.
+
+⚠️ **It also confirms the PHI exposure concretely.** `langfuse.observation.output`
+on the live trace root contained the model's full prose answer. Prompts and
+completions really are in these spans, verbatim. The self-hosting requirement is
+not theoretical.
+
 ## What was verified, and how far it goes
 
 Every claim above is either read from source in this tree or measured against
 running containers. Two limits are worth stating plainly rather than leaving for
 someone to discover:
 
-**The transform is verified against a synthetic span, not live LibreChat
-traffic.** `verify.sh` constructs a span by hand and asserts Phoenix reads it.
-That is a real end-to-end test of the collector, the transform, and Phoenix — but
-the span is one I wrote. Guarding against the obvious circularity (inventing both
-the attribute names and the parser), the keys were checked against the SDK itself:
+**`verify.sh` is a synthetic-span regression test — deliberately, and that is now
+its only job.** It constructs a span by hand so it runs in ~90s with no API
+keys, no model spend, and no LibreChat. The *architecture* is validated against
+live traffic above; `verify.sh` exists to catch a regression cheaply, and a
+negative control confirms it fails when the transform is removed.
+
+Guarding against the obvious circularity in it (inventing both the attribute
+names and the parser), the keys were checked against the SDK itself:
 
 | what | verified where |
 |---|---|
@@ -228,9 +338,10 @@ the attribute names and the parser), the keys were checked against the SDK itsel
 | `usage_details` inner keys `input` / `output` / `total` | population code in `@langfuse/*` — also emits prefixed variants (`input_cache_read`, …) |
 | ingest path `/api/public/otel/v1/traces` | `@langfuse/otel`, and it matches the shipped fanout collector's `traces_url_path` |
 
-The remaining gap is real traffic: which observation types LibreChat actually
-produces in practice, and whether `total` is always present. Both are cheap to
-close once the stack runs with tracing on, and neither changes the architecture.
+The remaining gap — which observation types LibreChat actually produces — was
+closed by the live run above. It produces `generation`, `span`, and `agent`;
+`agent` was missing from the map and is now covered, along with a fallback for
+anything unmapped.
 
 **The OpenShift claim is a container-level simulation, not a cluster test.**
 Running `--user 1000670000:0 --cap-drop ALL --security-opt no-new-privileges`

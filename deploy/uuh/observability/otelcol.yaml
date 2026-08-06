@@ -58,8 +58,24 @@ processors:
     trace_statements:
       - context: span
         statements:
+          # Observation-type map. The types below were enumerated from REAL
+          # LibreChat traffic (a claude-sonnet-5 agent run), not guessed: a live
+          # run emits generation, span, and agent. `agent` was initially missing
+          # here, which put the top-level AgentRun span into Phoenix as
+          # `unknown` — the whole trace root, unclassified. tool/retriever/
+          # embedding are mapped pre-emptively because File Search and tool
+          # calls will produce them once exercised.
           - set(attributes["openinference.span.kind"], "LLM") where attributes["langfuse.observation.type"] == "generation"
           - set(attributes["openinference.span.kind"], "CHAIN") where attributes["langfuse.observation.type"] == "span"
+          - set(attributes["openinference.span.kind"], "AGENT") where attributes["langfuse.observation.type"] == "agent"
+          - set(attributes["openinference.span.kind"], "TOOL") where attributes["langfuse.observation.type"] == "tool"
+          - set(attributes["openinference.span.kind"], "RETRIEVER") where attributes["langfuse.observation.type"] == "retriever"
+          - set(attributes["openinference.span.kind"], "EMBEDDING") where attributes["langfuse.observation.type"] == "embedding"
+          - set(attributes["openinference.span.kind"], "GUARDRAIL") where attributes["langfuse.observation.type"] == "guardrail"
+          - set(attributes["openinference.span.kind"], "EVALUATOR") where attributes["langfuse.observation.type"] == "evaluator"
+          # Fallback: anything typed but unmapped still classifies as CHAIN
+          # rather than landing as `unknown` and dropping out of Phoenix's views.
+          - set(attributes["openinference.span.kind"], "CHAIN") where attributes["langfuse.observation.type"] != nil and attributes["openinference.span.kind"] == nil
           - set(attributes["input.value"], attributes["langfuse.observation.input"]) where attributes["langfuse.observation.input"] != nil
           - set(attributes["output.value"], attributes["langfuse.observation.output"]) where attributes["langfuse.observation.output"] != nil
           - set(attributes["llm.model_name"], attributes["langfuse.observation.model.name"]) where attributes["langfuse.observation.model.name"] != nil
