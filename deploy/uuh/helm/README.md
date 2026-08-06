@@ -13,12 +13,57 @@ The hand-off artifact. Reproduce every claim here with
 
 | Question | Answer |
 |---|---|
-| Is there an official/community Helm chart? | **Yes — upstream ships one**, in this repo at `helm/librechat` (chart v2.0.7). No third-party chart needed. |
+| Is there an official/community Helm chart? | **Yes, several.** The official one is upstream's, already in this repo at `helm/librechat` (v2.0.7). It is also **published** — `helm repo add librechat https://danny-avila.github.io/LibreChat`. There are three community forks, including **an OpenShift-specific one**. See the survey below. |
 | What does it deploy? | LibreChat itself (Deployment, Service, Ingress, PVC, HPA, ServiceAccount) plus an optional Langfuse-fanout collector. Datastores come from **chart dependencies**: MongoDB + Redis (Bitnami), MeiliSearch, and a local `librechat-rag-api` subchart. |
 | Which pieces do we supply? | **Postgres + pgvector, and FerretDB.** Neither is a chart dependency. The chart's bundled MongoDB is disabled — UUH's architecture is FerretDB on PostgreSQL (CWORK-1112). |
 | Does the Helm path require a fork? | **No.** The chart exposes `volumes` / `volumeMounts` passthroughs and renders both security contexts from values, so everything needed is a values overlay. `helm/` is untouched. |
 | How does branding interact? | It doesn't. Branding is CSS applied at runtime (CWORK-1111), not an image change, so **no custom image build and no registry question** for branding specifically. |
 | What registries are needed? | `registry.librechat.ai` for the app image, and **Docker Hub** — Bitnami chart dependencies now resolve to `registry-1.docker.io/bitnamicharts/*`. Worth confirming against UUH's allowlist. |
+
+## Survey of published charts
+
+| Chart | Publisher | Chart / appVersion | Verified | Verdict |
+|---|---|---|---|---|
+| `librechat/librechat` | **danny-avila (official)** | 2.0.7 / v0.8.7 | ✅ official | **Use this.** It is what `helm/librechat` in this repo already is. Published to Artifact Hub + GitHub Pages. |
+| `openshift/librechat` | joaquinito2051 | 1.8.17 / **v0.8.5-rc1** | ❌ unverified | **Don't adopt — but borrow from.** See below. |
+| `blue-atlas/librechat` | blue-atlas | 0.2.0 | ❌ | Community fork, no OpenShift specialisation. |
+| `AstralJaeger/librechat-chart` | AstralJaeger | 1.9.1 | ❌ | Community fork. |
+
+### The OpenShift chart independently confirms this work — and improves it
+
+`charts.openshift.io` carries a LibreChat chart built specifically for OpenShift.
+Worth taking seriously, so it was pulled and read rather than judged by its
+listing. Two conclusions.
+
+**First: it reaches the same fix, independently.** Its `values.yaml` sets
+`securityContext: {}` and `podSecurityContext: {}` — no hardcoded UIDs — and
+mounts `emptyDir` volumes over the write paths, including `/app/uploads` and
+`/app/logs`, plus `/app/client/public/images` in its deployment template. That
+is the same diagnosis and the same remedy arrived at here from the Dockerfile
+and a container test. Two independent parties converging is good corroboration
+that the failure is real and the fix is the conventional one.
+
+**Second: don't adopt it.** It targets **appVersion `v0.8.5-rc1`** — two minor
+versions behind the `v0.8.7` this fork runs, and a release candidate. Publisher
+is an individual, unverified, no stars, last updated 2026-04-10. Adopting it
+would mean taking a stale third-party chart as the deployment substrate for a
+multi-year health-system commitment, and inheriting its upgrade cadence rather
+than upstream's. The values-overlay approach keeps us on the official chart.
+
+**What was taken from it:** the **Route template**. `route.yaml` here is modelled
+on theirs. There was no reason to reinvent a correct twelve-line object, and it
+converts "Routes vs Ingress is a Jason conversation" into a concrete artifact.
+
+**What was deliberately not taken:** it also mounts `/app/data` and
+`/app/api/logs`. Checked against the v0.8.7 image — **neither directory exists,
+and neither appears anywhere in the source.** They are almost certainly
+vestigial from the older version it targets. Harmless (an `emptyDir` just
+creates the path) but they would be cargo-cult, so the overlay stays at the
+three paths that are actually written to.
+
+It also ships LiteLLM templates (`litellm-deployment.yaml`, `litellm-route.yaml`).
+Not relevant here — UUH has their own AI gateway (CWORK-1114) — but worth
+knowing it exists as a reference if that path is ever wanted.
 
 ## Failure 1 — the image cannot write under an arbitrary UID
 
@@ -138,11 +183,21 @@ enabled at once, an admission failure gives you four suspects and no logs.
 
 ## Ingress vs Route
 
-OpenShift accepts standard `Ingress` and materialises a Route from it
-automatically, so the stock template works. A **native Route with edge TLS
-termination** and UUH's certificate is more idiomatic and is a Jason
-conversation. `ingress.enabled: false` for now rather than shipping a guess at
-their hostname and TLS setup.
+OpenShift materialises a Route from a plain `Ingress` automatically, so the
+stock template would work. But a native Route is the idiomatic object and the
+only way to declare edge TLS and an HTTP→HTTPS redirect, so `route.yaml` ships
+here as a standalone manifest — a values overlay cannot add a template to a
+chart, and `helm/` stays untouched.
+
+`ingress.enabled: false` in the overlay so the two do not both claim the
+hostname.
+
+⚠️ Two fields need UUH input before this is production-ready: the **hostname**
+(left blank, so OpenShift generates one — fine for a first deployment) and
+whether the certificate is cluster-default or UUH-supplied. Both are Jason
+conversations. If encryption is required all the way to the pod rather than
+terminating at the router, `termination: edge` becomes `reencrypt` and the pod
+needs a serving certificate.
 
 ## How to deploy
 
@@ -151,6 +206,9 @@ helm dependency build ./helm/librechat
 helm upgrade --install librechat ./helm/librechat \
   -f deploy/uuh/helm/values-openshift.yaml \
   --namespace <uuh-namespace>
+
+# Native Route (optional — OpenShift would generate one from an Ingress)
+oc apply -f deploy/uuh/helm/route.yaml -n <uuh-namespace>
 ```
 
 Nothing under `helm/` is modified, so upstream chart updates merge cleanly.

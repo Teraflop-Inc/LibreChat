@@ -1,0 +1,52 @@
+# OpenShift Route for LibreChat — CWORK-1115
+#
+# The upstream chart ships an Ingress template but no Route template, and a
+# values overlay cannot add a template to a chart. So this is a standalone
+# manifest, applied alongside the Helm release:
+#
+#   oc apply -f deploy/uuh/helm/route.yaml -n <uuh-namespace>
+#
+# OpenShift will materialise a Route from a plain Ingress automatically, so this
+# is not strictly required — but a native Route is the idiomatic object, and it
+# is the only way to express edge TLS termination and the HTTP→HTTPS redirect
+# declaratively.
+#
+# Shape borrowed from the community `openshift/librechat` chart
+# (charts.openshift.io, publisher joaquinito2051). That chart is NOT adopted
+# wholesale — see README.md for why — but its Route template is sound and there
+# is no reason to reinvent it.
+#
+# ── BEFORE APPLYING ───────────────────────────────────────────────────────────
+# 1. `host` is intentionally left blank. Blank means OpenShift generates a
+#    hostname from the route name, namespace, and cluster ingress domain, which
+#    is right for a first deployment. Set it explicitly once UUH decides the
+#    public hostname — that is a Jason conversation, along with whether the
+#    certificate is cluster-default or UUH-supplied.
+# 2. `name` must match the Helm release's Service name. With
+#    `helm install librechat ./helm/librechat` that is `librechat`; adjust
+#    `to.name` if the release is named differently.
+# 3. `termination: edge` terminates TLS at the router and speaks HTTP to the
+#    pod. That is correct here because LibreChat serves plain HTTP. If UUH
+#    requires encryption in transit all the way to the pod, this becomes
+#    `reencrypt` and the pod needs a serving certificate.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: librechat
+  labels:
+    app.kubernetes.io/name: librechat
+    app.kubernetes.io/managed-by: uuh-overlay
+spec:
+  # Leave blank for a cluster-generated hostname; set once UUH picks one.
+  host: ''
+  to:
+    kind: Service
+    name: librechat
+    weight: 100
+  port:
+    # Named port on the Service. The upstream chart names it `http`.
+    targetPort: http
+  tls:
+    termination: edge
+    # Force HTTPS. A health system should not serve this over plain HTTP.
+    insecureEdgeTerminationPolicy: Redirect

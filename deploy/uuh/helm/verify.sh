@@ -54,7 +54,14 @@ docker run -d --name lc-scc-neg --user "$UID_GID" \
   --security-opt no-new-privileges --cap-drop ALL \
   -v "$MINENV:/app/.env:ro" \
   -e HOST=0.0.0.0 -e PORT=3080 "$IMG" >/dev/null 2>&1
-sleep 22
+# Poll rather than sleep a fixed interval: on a loaded machine a fixed 22s was
+# occasionally short enough to read the logs before the crash landed, which made
+# this control fail intermittently. A flaky control is worse than no control.
+for _ in $(seq 1 40); do
+  docker logs lc-scc-neg 2>&1 | grep -q "EACCES" && break
+  [ "$(docker inspect -f '{{.State.Status}}' lc-scc-neg 2>/dev/null)" = "exited" ] && break
+  sleep 2
+done
 NEG_STATUS=$(docker inspect -f '{{.State.Status}}' lc-scc-neg 2>/dev/null)
 if [ "$NEG_STATUS" = "exited" ] && docker logs lc-scc-neg 2>&1 | grep -q "EACCES"; then
   pass "crashlooped with EACCES, as expected — the failure is real"
@@ -72,7 +79,14 @@ docker run -d --name lc-scc-pos --user "$UID_GID" \
   --tmpfs /app/client/public/images:rw,mode=1777 \
   -v "$MINENV:/app/.env:ro" \
   -e HOST=0.0.0.0 -e PORT=3080 "$IMG" >/dev/null 2>&1
-sleep 30
+# Wait until the process has clearly got past startup — either it settled
+# (running) or it exited on the unreachable database. Either way it is far
+# enough along for "did it hit EACCES?" to be a meaningful question.
+for _ in $(seq 1 40); do
+  docker logs lc-scc-pos 2>&1 | grep -qiE "EACCES|MongoDB|listening|ENOTFOUND|querySrv" && break
+  [ "$(docker inspect -f '{{.State.Status}}' lc-scc-pos 2>/dev/null)" = "exited" ] && break
+  sleep 2
+done
 # No datastores here, so the process may exit on a DB connect rather than a
 # permission error. The claim under test is narrow: no EACCES.
 if docker logs lc-scc-pos 2>&1 | grep -q "EACCES"; then
