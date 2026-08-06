@@ -7,9 +7,9 @@ bills UUH ~$250/hr.
 
 > ## Headline: the 100-hour block does not reach production.
 >
-> Full scope estimates at **~156 hours** (band 135–190h). About **30h is already
-> consumed**. The block covers M1, M2 validation, the research tickets, and the start
-> of Helm work — it stops well short of a running OpenShift deployment.
+> Full scope estimates at **~158 hours** (band 135–190h). **29.5h is already
+> consumed**, itemised below. The block covers M1, M2 validation, the research tickets,
+> and the start of Helm work — it stops well short of a running OpenShift deployment.
 >
 > This is a finding, not a problem. Better to say it now than at hour 95.
 
@@ -167,7 +167,7 @@ assumes one of those goes wrong — most likely the extension privileges or `res
 
 Roughly: everything through M2 validation and the research tickets, plus the Helm chart
 authored and the first OpenShift deployment attempted — approximately **hours 1–100 of
-the 156**. It stops mid-Phase-4.
+the 157.5**. It stops mid-Phase-4.
 
 That is a defensible place to pause and re-scope with a real measurement of the OpenShift
 work in hand, rather than the estimate above.
