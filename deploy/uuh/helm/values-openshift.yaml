@@ -1,0 +1,129 @@
+# UUH OpenShift values overlay — CWORK-1115
+#
+# Applies on top of the UPSTREAM chart at helm/librechat. Nothing in helm/ is
+# modified, so the chart stays pristine and upstream releases merge cleanly:
+#
+#   helm upgrade --install librechat ./helm/librechat \
+#     -f deploy/uuh/helm/values-openshift.yaml
+#
+# ── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────
+# The stock chart + stock image DO NOT RUN on OpenShift `restricted-v2`. Measured,
+# not assumed — LibreChat's own image under an arbitrary UID:
+#
+#   status: exited exit=1
+#   error: There was an uncaught error:
+#          EACCES: permission denied, open '/app/logs/error-2026-08-06.log'
+#
+# It is a crashloop at startup, not a degradation. Two independent causes:
+#
+#   1. The image runs as `USER node` = uid 1000, and /app, /app/uploads and
+#      /app/client/public/images are all mode 755 owned by node:node. OpenShift
+#      assigns an arbitrary UID in group 0, which is neither the owner nor in
+#      group 1000 — so it falls through to "other" (r-x) and cannot write.
+#      The Dockerfile uses `chown node:node`, not the OpenShift-compatible
+#      `chgrp 0 && chmod g=u`.
+#
+#   2. The chart hardcodes UIDs that restricted-v2 rejects at admission:
+#         podSecurityContext.fsGroup: 2000
+#         securityContext.runAsUser:  1000
+#      restricted-v2 allocates a per-namespace UID/GID range and requires values
+#      inside it. A pod requesting a specific UID is refused before it ever runs.
+#
+# Verified fix: same arbitrary UID + writable volumes at the three paths →
+#   status: running  ·  Connected to MongoDB  ·  Server listening on port 3080
+#   /health → HTTP 200
+#
+# Reproduce: bash deploy/uuh/helm/verify.sh
+
+# ── 1. Let OpenShift assign the UID ───────────────────────────────────────────
+#
+# ⚠️ THE KEY MUST BE SET TO `null`, NOT OMITTED AND NOT `{}`.
+#
+# Helm *merges* values maps — it does not replace them. Writing
+# `podSecurityContext: {}` here leaves the base chart's `fsGroup: 2000` fully
+# intact, and omitting `runAsUser` from the securityContext block leaves the
+# base chart's `runAsUser: 1000` intact. Both then reach the API server and are
+# rejected by restricted-v2 admission.
+#
+# This is not theoretical: the first draft of this file used `{}` and a rendered
+# assertion caught both keys still present. Explicit `null` is the only thing
+# that deletes an inherited key.
+podSecurityContext:
+  fsGroup: null
+
+# runAsUser: null lets OpenShift inject a UID from the namespace's allocated
+# range. runAsNonRoot and the capability drop are kept — both are what
+# restricted-v2 wants anyway, and stating them explicitly keeps the manifest
+# correct on a vanilla cluster that has no SCC controller at all.
+securityContext:
+  runAsUser: null
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── 2. Make the three write paths writable ────────────────────────────────────
+# These are exactly the three the upstream maintainers bind-mount in
+# docker-compose.yml, so the list is corroborated rather than guessed:
+#   ./images  -> /app/client/public/images
+#   ./uploads -> /app/uploads
+#   ./logs    -> /app/logs
+#
+# /app/client/public/images is handled by the chart's own imageVolume flag (a
+# PVC). The other two get emptyDir here because neither needs to survive a pod
+# restart — logs should ship to the log stack, and uploads are staged before
+# they land in object storage / the RAG pipeline.
+#
+# ⚠️ If UUH wants uploads durable across restarts, promote /app/uploads to a PVC.
+# That is a real decision, not an oversight — flag it with Jason.
+librechat:
+  imageVolume:
+    enabled: true
+    size: 10G
+    accessModes: ReadWriteOnce
+
+volumes:
+  - name: librechat-logs
+    emptyDir: {}
+  - name: librechat-uploads
+    emptyDir: {}
+
+volumeMounts:
+  - name: librechat-logs
+    mountPath: /app/logs
+  - name: librechat-uploads
+    mountPath: /app/uploads
+
+# ── 3. Datastores ─────────────────────────────────────────────────────────────
+# The chart's bundled MongoDB is DISABLED. UUH's architecture is FerretDB on
+# PostgreSQL (CWORK-1112) — there is no MongoDB in the proposed deployment, no
+# MongoDB Inc. relationship, and no SSPL-licensed software. MONGO_URI points at
+# FerretDB, which speaks the Mongo wire protocol.
+#
+# ⚠️ Bitnami charts are a second reason to avoid this dependency: they carry
+# their own fixed-UID securityContexts that hit the same restricted-v2 wall, and
+# Bitnami's public catalogue distribution changed in 2025. Do not re-enable it
+# without re-testing admission.
+mongodb:
+  enabled: false
+
+# MeiliSearch and Redis are Bitnami-family too and unverified under
+# restricted-v2. Left OFF here deliberately so the first OpenShift deployment
+# has the smallest possible surface; enable and re-test one at a time.
+meilisearch:
+  enabled: false
+redis:
+  enabled: false
+
+# RAG API ships as a local subchart. Off until its own SCC posture is checked
+# the same way the main image was.
+librechat-rag-api:
+  enabled: false
+
+# ── 4. Ingress ────────────────────────────────────────────────────────────────
+# OpenShift supports Ingress and materialises it as a Route automatically, so the
+# stock Ingress template is usable. A native Route (with edge TLS termination
+# and UUH's cert) is the more idiomatic choice and is a Jason conversation.
+ingress:
+  enabled: false
