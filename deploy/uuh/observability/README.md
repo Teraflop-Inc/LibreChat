@@ -18,9 +18,23 @@ LibreChat is already a first-class OTLP producer:
 
 | Component | Where | What it emits |
 |---|---|---|
-| OTel Node SDK | `packages/api/src/telemetry/` | **Infrastructure only** — http, express, mongodb, mongoose, undici, ioredis. No LLM spans. |
+| OTel Node SDK | `packages/api/src/telemetry/` | Auto-instrumentation — http, express, mongodb, mongoose, undici, ioredis — **plus two LibreChat-authored application spans**: `librechat.agent.startup` (startup milestone timing) and `librechat.sse.stream` (bytes, chunks, time-to-first-chunk, end reason). **No LLM content, tokens, cost, or model name on any of them.** |
 | Langfuse v5 SDK | `packages/api/src/langfuse/` + `@librechat/agents` | **All LLM telemetry** — prompts, completions, model, tokens, cost |
 | OTel collector | `otel/langfuse-fanout/` + `helm/librechat/templates/langfuse-fanout-*` | fan-out, routing, filtering |
+
+The distinction matters and an earlier draft of this document got it wrong. LibreChat
+*does* author its own spans — `grep startSpan` finds them — so "infrastructure only" is
+inaccurate. What holds is the substantive point: those spans carry request and stream
+performance, never LLM payload. Verified by enumerating every attribute key set in
+`packages/api/src/telemetry/` and `agents/startup.ts`; the only `setCompletionAttributes`
+in the tree is **HTTP** completion (`http.route`, `http.response.status_code`), not LLM
+completion.
+
+⚠️ One thing those spans *do* carry: **`enduser.id`** — the authenticated user id is
+attached to every request span (`setIdentityAttributes`), alongside
+`librechat.tenant.id`. Not a name or PHI, but it is user-identifying, and it means the
+generic OTel stream is not anonymous. Worth knowing before choosing where those spans
+land.
 
 Two consequences that matter more than the platform choice:
 
@@ -99,6 +113,18 @@ Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` but forget
 `LANGFUSE_BASE_URL`, and **every prompt and completion is exported to a
 third-party cloud in the EU.** No warning, no failure — tracing simply works, at
 the wrong destination.
+
+**It is not only the env var.** The Helm chart carries the same default:
+
+```yaml
+# helm/librechat/values.yaml
+langfuseFanout:
+  central:
+    baseUrl: https://cloud.langfuse.com
+```
+
+So both the application default and the deployment default point off-premises. Two
+independent places to get this wrong, neither of which fails loudly.
 
 For a health system this is the same class of finding as CWORK-1116's hosted code
 interpreter. It belongs in the deployment checklist as a hard gate, not a note.
@@ -183,3 +209,32 @@ LibreChat ──OTLP──▶ collector ──┬──▶ Langfuse   (native at
   observation types (`event`, `agent`, `tool`, `retriever`) will land in Phoenix
   as `unknown` until added — trivial, but it needs real LibreChat traffic to
   enumerate which types actually appear.
+
+## What was verified, and how far it goes
+
+Every claim above is either read from source in this tree or measured against
+running containers. Two limits are worth stating plainly rather than leaving for
+someone to discover:
+
+**The transform is verified against a synthetic span, not live LibreChat
+traffic.** `verify.sh` constructs a span by hand and asserts Phoenix reads it.
+That is a real end-to-end test of the collector, the transform, and Phoenix — but
+the span is one I wrote. Guarding against the obvious circularity (inventing both
+the attribute names and the parser), the keys were checked against the SDK itself:
+
+| what | verified where |
+|---|---|
+| `langfuse.observation.{type,input,output,model.name,usage_details}` | attribute constants in `@langfuse/core` |
+| `usage_details` inner keys `input` / `output` / `total` | population code in `@langfuse/*` — also emits prefixed variants (`input_cache_read`, …) |
+| ingest path `/api/public/otel/v1/traces` | `@langfuse/otel`, and it matches the shipped fanout collector's `traces_url_path` |
+
+The remaining gap is real traffic: which observation types LibreChat actually
+produces in practice, and whether `total` is always present. Both are cheap to
+close once the stack runs with tracing on, and neither changes the architecture.
+
+**The OpenShift claim is a container-level simulation, not a cluster test.**
+Running `--user 1000670000:0 --cap-drop ALL --security-opt no-new-privileges`
+reproduces what `restricted-v2` does to a container, and it is how the Phoenix
+crash was found. It does **not** cover SCC admission, SELinux labelling, volume
+`fsGroup` behaviour, or NetworkPolicy. A real cluster test remains part of
+CWORK-1115.
